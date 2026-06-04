@@ -127,10 +127,14 @@ CheckFileTimes() {
         return
     tLauncher := 0
     tExp      := 0
-    if (FileExist(launcherPath))
-        tLauncher := FileGetTime(launcherPath, "M")
-    if (FileExist(textExpansionPath))
-        tExp := FileGetTime(textExpansionPath, "M")
+    try {
+        if (FileExist(launcherPath))
+            tLauncher := FileGetTime(launcherPath, "M")
+        if (FileExist(textExpansionPath))
+            tExp := FileGetTime(textExpansionPath, "M")
+    } catch {
+        return  ; Drive briefly unreachable (e.g. cloud-synced folder) - skip, retry on next poll
+    }
     if (tLauncher > lastLauncherMod || tExp > lastExpMod) {
         ; Verify files aren't mid-write by an external editor (no .lock file present)
         ; FileOpen read attempt will fail if file is exclusively locked by another process
@@ -199,14 +203,20 @@ SafeInitialize() {
         SetupHotkeys()
         SetTimer(SaveUsageStats, 60000)
 
-        if (FileExist(launcherPath))
-            lastLauncherMod := FileGetTime(launcherPath, "M")
-        else
+        try {
+            if (FileExist(launcherPath))
+                lastLauncherMod := FileGetTime(launcherPath, "M")
+            else
+                lastLauncherMod := 0
+            if (FileExist(textExpansionPath))
+                lastExpMod := FileGetTime(textExpansionPath, "M")
+            else
+                lastExpMod := 0
+        } catch {
+            ; Drive briefly unreachable at startup - watcher will pick up real times on its first poll
             lastLauncherMod := 0
-        if (FileExist(textExpansionPath))
-            lastExpMod := FileGetTime(textExpansionPath, "M")
-        else
             lastExpMod := 0
+        }
         SetTimer(CheckFileTimes, config["Performance"]["FileWatchInterval"])
 
         SetupTrayMenu()
