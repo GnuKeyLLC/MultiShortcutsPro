@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+ #Requires AutoHotkey v2.0
 #SingleInstance Force
 
 ;================================================
@@ -714,7 +714,7 @@ AddNewLauncher() {
     ; Resolve .lnk shortcut files to their real target before validation
     ; A .lnk could point to cmd.exe or powershell.exe with arguments
     targetToValidate := selectedFile
-    if (StrLower(SubStr(selectedFile, -3)) = ".lnk") {
+    if (StrLower(SubStr(selectedFile, -4)) = ".lnk") {
         try {
             FileGetShortcut(selectedFile, &lnkTarget)
             if (lnkTarget != "")
@@ -1863,8 +1863,7 @@ PopulateLauncherList(lv, filter) {
         if (filter != "" && !InStr(shortcut, filter) && !InStr(target, filter))
             continue
         type := InStr(target, "://") || InStr(target, "mailto:") ? "Web/Email"
-              : (SubStr(StrLower(target), -3) = ".exe"
-              || SubStr(StrLower(target), -3) = ".lnk") ? "App"
+              : RegExMatch(StrLower(target), '\.(exe|lnk)("|\s|$)') ? "App"
               : "Document"
         lv.Add("", shortcut, target, type)
         count++
@@ -2264,10 +2263,13 @@ LaunchTarget(target, shortcut := "") {
     try {
         if (InStr(cleanTarget, "://") || InStr(cleanTarget, "mailto:")) {
             Run(cleanTarget)
+        } else if (FileExist(cleanTarget)) {
+            ; Full path exists (handles paths with spaces, e.g. Program Files)
+            Run('"' . cleanTarget . '"')
         } else {
             ; Extract base path (strip trailing arguments)
-            testPath := (SubStr(cleanTarget, 1, 1) = '"')
-                      ? RegExReplace(cleanTarget, '^"([^"]+)".*', "$1")
+            testPath := (SubStr(target, 1, 1) = '"')
+                      ? RegExReplace(target, '^"([^"]+)".*', "$1")
                       : StrSplit(cleanTarget, " ")[1]
 
             ; Warn if path looks like a file/folder that doesn't exist
@@ -2278,10 +2280,7 @@ LaunchTarget(target, shortcut := "") {
                        testPath, "Launch Error", "Icon!")
                 return
             }
-            if (FileExist(cleanTarget))
-                Run('"' . cleanTarget . '"')
-            else
-                Run(cleanTarget)
+            Run(cleanTarget)
         }
         PlayFeedback("LaunchSound")
     } catch Error as err {
