@@ -1,4 +1,4 @@
- #Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Force
 
 ;================================================
@@ -2381,6 +2381,7 @@ DoExpand(text, sc) {
         SendExpandText(resolved, config)
         if (cursorPos > 0)
             Send("{Left " . cursorPos . "}")
+        ReleaseStuckModifiers()
         return
     }
 
@@ -2485,6 +2486,7 @@ DoExpand(text, sc) {
 
     if (cursorPos > 0)
         Send("{Left " . cursorPos . "}")
+    ReleaseStuckModifiers()
 }
 
 ; Helper – sends a text chunk, choosing SendEvent for large blocks
@@ -2503,6 +2505,19 @@ SendExpandText(txt, cfg) {
             SendText(txt . " ")
     }
     A_Clipboard := savedClip
+}
+
+; Helper - releases any modifier key that is logically "down" but not
+; physically held. Fast typing during an expansion can leave Shift (or
+; Ctrl) stuck in the down state, which makes everything type uppercase
+; and causes Shift+Restart to boot into Windows Advanced Startup.
+; Alt is deliberately excluded: a lone Alt-up can activate an app's
+; menu bar, and Alt is not a stuck-key risk for our send operations.
+ReleaseStuckModifiers() {
+    for , modKey in ["LShift", "RShift", "LCtrl", "RCtrl", "LWin", "RWin"] {
+        if (GetKeyState(modKey) && !GetKeyState(modKey, "P"))
+            Send("{" . modKey . " up}")
+    }
 }
 
 ; Placeholder registry
@@ -3011,4 +3026,4 @@ OnExit((*) => SaveUsageStats())
 
 ;------------------------------------------------
 ; END OF SCRIPT
-;------------------------------------------------
+;------------------------------------------------ 
