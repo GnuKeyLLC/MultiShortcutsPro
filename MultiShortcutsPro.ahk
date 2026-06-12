@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
 
 ;================================================
@@ -481,7 +481,20 @@ SetupTrayMenu() {
         A_TrayMenu.Check("Run on Windows Startup")
     if (config["Feedback"]["PlaySounds"])
         A_TrayMenu.Check("Sound Feedback")
+    SetAppIcon()
     UpdateTrayTooltip()
+}
+
+; Use a custom icon if MultiShortcutsPro.ico sits beside the script; otherwise
+; the classic AutoHotkey green H (icon 1 in the interpreter exe).
+SetAppIcon() {
+    icoPath := A_ScriptDir . "\MultiShortcutsPro.ico"
+    try {
+        if (FileExist(icoPath))
+            TraySetIcon(icoPath)
+        else
+            TraySetIcon(A_AhkPath, 1)
+    }
 }
 
 UpdateTrayTooltip() {
@@ -1764,7 +1777,7 @@ MigratePrefixIn(dataMap, filePath, oldPrefix, newPrefix, headerComment) {
 ; EDIT GUI
 ;------------------------------------------------
 ShowEditGUI(startTab := "launchers") {
-    gEdit := Gui("+Resize +MinSize640x460", "MultiShortcuts Pro - Manage Shortcuts")
+    gEdit := Gui("-Resize", "MultiShortcuts Pro - Manage Shortcuts")
     gEdit.SetFont("s10", "Segoe UI")
     gEdit.BackColor := "F5F5F5"
     tabs := gEdit.Add("Tab3", "x8 y8 w784 h460 +BackgroundF5F5F5",
@@ -1779,9 +1792,9 @@ ShowEditGUI(startTab := "launchers") {
     countL := gEdit.Add("Text", "x380 y48 w390 h20 +Right cGray vCountL", "")
     lvL := gEdit.Add("ListView", "x18 y76 w764 h320 Grid +LV0x10000 vLvL",
                      ["Shortcut", "Target", "Type"])
-    lvL.ModifyCol(1, "AutoHdr")
-    lvL.ModifyCol(2, "Auto")
-    lvL.ModifyCol(3, "AutoHdr")
+    lvL.ModifyCol(1, 130)
+    lvL.ModifyCol(2, 530)
+    lvL.ModifyCol(3, 85)
     gEdit.Add("Button", "x18  y406 w110 h26", "&Edit")
         .OnEvent("Click", (*) => EditSelectedRow(lvL, "launchers", gEdit, searchL, countL))
     gEdit.Add("Button", "x134 y406 w110 h26", "&Delete")
@@ -1806,8 +1819,8 @@ ShowEditGUI(startTab := "launchers") {
     countE := gEdit.Add("Text", "x380 y48 w390 h20 +Right cGray vCountE", "")
     lvE := gEdit.Add("ListView", "x18 y76 w764 h320 Grid +LV0x10000 vLvE",
                      ["Shortcut", "Expands To"])
-    lvE.ModifyCol(1, "AutoHdr")
-    lvE.ModifyCol(2, "Auto")
+    lvE.ModifyCol(1, 130)
+    lvE.ModifyCol(2, 615)
     gEdit.Add("Button", "x18  y406 w110 h26", "&Edit")
         .OnEvent("Click", (*) => EditSelectedRow(lvE, "expansions", gEdit, searchE, countE))
     gEdit.Add("Button", "x134 y406 w110 h26", "&Delete")
@@ -2347,8 +2360,13 @@ DoExpand(text, sc) {
     for idx, tok in seqTokens
         resolved := StrReplace(resolved, "##SEQ" . idx . "##", tok)
 
-    ; ── Step 4: record history using the fully-resolved string ───────────────
-    RecordExpansionHistory(sc, sc, resolved)
+    ; ── Step 4: record history using only the text actually typed ────────────
+    ; Strip {key:}/{wait:}/{focus:}/{cursor} tokens - they type nothing, so
+    ; counting them inflates the undo length and Alt+Z would backspace real
+    ; document text. Command-only shortcuts are not recorded at all.
+    typedText := RegExReplace(resolved, "\{(?:(?:key|wait|focus):(?:[^{}]|\{[^{}]*\})*|cursor(?::\d+)?)\}", "")
+    if (Trim(typedText) != "")
+        RecordExpansionHistory(sc, sc, typedText)
     TrackUsage(sc, "expansion")
     PlayFeedback("ExpandSound")
 
@@ -3010,7 +3028,7 @@ ToggleMacrosPause() {
         PlayFeedback("ErrorSound")
     } else {
         Suspend(false)
-        TraySetIcon("shell32.dll", 46)
+        SetAppIcon()
         TrayTip("ACTIVE", "All macros are active", "Iconi")
         PlayFeedback("ExpandSound")
     }
@@ -3026,4 +3044,4 @@ OnExit((*) => SaveUsageStats())
 
 ;------------------------------------------------
 ; END OF SCRIPT
-;------------------------------------------------ 
+;------------------------------------------------
