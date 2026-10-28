@@ -2,8 +2,8 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO - 2026
-; SHORTCUT FAMILIES:  ;  `  =
+; MULTISHORTCUTS PRO v2.0.0 - 2026
+; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
 ; Implementation assisted by Claude (Anthropic)
@@ -44,7 +44,8 @@ global config := Map(
         "ReloadScript",        "!r",
         "ShowHelp",            "!h",
         "PauseResume",         "!p",
-        "UndoExpansion",       "!z"
+        "UndoExpansion",       "!z",
+        "SnipTool",            "!+s"
     ),
     "Security", Map(
         "ConfirmDangerousTargets", true,
@@ -53,7 +54,14 @@ global config := Map(
         "BlockedProtocols", ["cmd", "powershell", "runas", "regedit",
                              "ms-settings", "vbscript", "javascript",
                              "wscript", "cscript", "ms-msdt", "search-ms",
-                             "shell", "calculator", "ms-help", "file"]
+                             "shell", "calculator", "ms-help", "file"],
+        ; File types a launcher may open. Anything else (scripts, installers,
+        ; .com, .scr, .js, .reg ...) is refused. Folders are always allowed.
+        "AllowedExtensions", ["exe", "lnk",
+                              "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+                              "odt", "ods", "odp", "rtf", "txt", "md", "csv", "log",
+                              "png", "jpg", "jpeg", "gif", "bmp", "webp",
+                              "mp3", "mp4", "wav", "m4a", "mov", "zip"]
     ),
     "Performance", Map(
         "MaxBackupFiles",     10,
@@ -72,12 +80,10 @@ global config := Map(
     ),
     "Triggers", Map(
         ; Trigger characters for the built-in shortcut families.
-        ;   WinCmd    = single-char prefix for commands (e.g. ;t = Top of page)
-        ;   AppLaunch = launcher prefix (e.g. `c = Claude)
         ; User-editable via tray menu → "Trigger Keys Setup…"
         ; Persisted in prefs.ini [Triggers].
-        "WinCmd",    ";",
-        "AppLaunch", "``"
+        "WinCmd",    ";",   ; Windows commands family  (e.g. ;c = Ctrl+C)
+        "AppLaunch", "``"   ; Quick app launch family  (e.g. `S = Snip Tool)
     ),
     "Feedback", Map(
         "PlaySounds",    false,
@@ -87,6 +93,17 @@ global config := Map(
         "BackupSound",   "*48"
     )
 )
+
+;------------------------------------------------
+; MODE: STARTER (default) vs FULL
+; Starter = only ; ` = families active. Lightweight intro.
+; Full    = everything: text expansion engine, launchers, GUI editor,
+;           file watcher, CSV import/export, etc.
+;
+; Stored in prefs.ini [Mode] Level=starter | full
+; One-way unlock via tray menu - once Full, stays Full.
+;------------------------------------------------
+global appMode := "starter"     ; flipped to "full" during init if prefs say so
 
 ;------------------------------------------------
 ; GLOBAL STATE
@@ -102,14 +119,24 @@ global loadedLaunchers       := Map()
 global loadedExpansions      := Map()
 global registeredLaunchers   := []
 global registeredExpansions  := Map()  ; shortcut -> opts used for registration
+global instantExpansions     := Map()  ; shortcuts saved with the $$ instant-fire suffix
 global expansionHistory  := []
 global usageStats        := Map()
 global lvSortCol         := Map("launchers", 0, "expansions", 0)
 global lvSortAsc         := Map("launchers", true, "expansions", true)
-
-; Path to legacy megabar.ini - kept only for one-time cleanup on startup.
-; The F-Key MegaBar feature was retired; this file is deleted if found.
-global megaBarPath       := A_ScriptDir . "\megabar.ini"
+global holdKeysOn        := false     ; hold ; = Ctrl, hold ` = Alt (see HOLD KEYS)
+global holdKeysMs        := 200
+global holdKeysMenu      := "Hold `; for Ctrl, hold `` for Alt"
+global holdKeysNews      := false     ; true = upgrade: show the one-time What's New
+global capsKeyOn         := false     ; Caps Lock: tap = backtick, hold = Alt (on by default)
+global capsKeyMenu       := "Caps Lock: tap = ``, hold = Alt"
+global mouseKeyOn        := false     ; middle mouse button in use (on by default, like ;)
+global mouseKeyMode      := "ctrl"    ; "alt"  = click types `, hold = Alt   (like Caps Lock)
+                                      ; "ctrl" = click types ;, hold = Ctrl  (like the semicolon)
+global mouseSubMenu      := ""        ; the tray sub-menu (rebuilt with the tray menu)
+global mouseItemOff      := "Off - normal middle click"
+global mouseItemAlt      := "Click = ``, hold = Alt   (like Caps Lock)"
+global mouseItemCtrl     := "Click = `;, hold = Ctrl   (like the semicolon)"
 
 ;------------------------------------------------
 ; AUTO-RELOAD ON EXTERNAL FILE CHANGE
@@ -122,19 +149,17 @@ CheckFileTimes() {
     global launcherPath, textExpansionPath, lastLauncherMod, lastExpMod, lastReload
     if (A_TickCount - lastReload < 5000)
         return
-    ; Don't reload if a write is in progress (lock file present)
-    if (FileExist(launcherPath . ".lock") || FileExist(textExpansionPath . ".lock"))
-        return
+    ; Don't reload if a write is in progress (lock file present and recent)
+    for , lp in [launcherPath . ".lock", textExpansionPath . ".lock"] {
+        if (FileExist(lp) && !IsStaleLock(lp))
+            return
+    }
     tLauncher := 0
     tExp      := 0
-    try {
-        if (FileExist(launcherPath))
-            tLauncher := FileGetTime(launcherPath, "M")
-        if (FileExist(textExpansionPath))
-            tExp := FileGetTime(textExpansionPath, "M")
-    } catch {
-        return  ; Drive briefly unreachable (e.g. cloud-synced folder) - skip, retry on next poll
-    }
+    if (FileExist(launcherPath))
+        tLauncher := FileGetTime(launcherPath, "M")
+    if (FileExist(textExpansionPath))
+        tExp := FileGetTime(textExpansionPath, "M")
     if (tLauncher > lastLauncherMod || tExp > lastExpMod) {
         ; Verify files aren't mid-write by an external editor (no .lock file present)
         ; FileOpen read attempt will fail if file is exclusively locked by another process
@@ -168,27 +193,17 @@ ReloadScriptSilent() {
 SafeInitialize()
 
 SafeInitialize() {
-    global backupDir, loadedLaunchers, loadedExpansions
+    global backupDir, loadedLaunchers, loadedExpansions, appMode
     global launcherPath, textExpansionPath, lastLauncherMod, lastExpMod
-    global megaBarPath
     try {
+        ; Mode + sound + triggers always load (cheap, needed in both modes)
         LoadSoundPrefs()
         LoadTriggerPrefs()
+        LoadModePref()
+        LoadHoldKeysPrefs()
 
-        ; First, check if we're running from a temporary location like Downloads.
-        ; If yes and this is the first run, offer to relocate to a permanent home
-        ; on the user's Desktop. If we relocate, exit immediately so the new
-        ; instance (already launched at the new location) takes over.
-        if (CheckRunningLocation()) {
-            ExitApp
-        }
-
-        ; Clean up orphaned megabar.ini from older versions
-        if (FileExist(megaBarPath)) {
-            try FileDelete(megaBarPath)
-        }
-
-        ; Set up the data files - seeding the built-in ; ` = families
+        ; Always set up the data files - seeding the built-in ; ` = families
+        ; happens here. Starter mode users get them too.
         if (!DirExist(backupDir))
             DirCreate(backupDir)
         InitializeFiles()
@@ -196,14 +211,19 @@ SafeInitialize() {
         MigratePipeSeparators()
         LoadLaunchers()
         LoadTextExpansions()
+        ApplyHoldKeys()
 
-        ; Full feature set always loads - no more starter/full split
-        LoadUsageStats()
-        LoadExpansionHistory()
-        SetupHotkeys()
-        SetTimer(SaveUsageStats, 60000)
+        ; The built-in families are registered as hotstrings via LoadTextExpansions
+        ; and LoadLaunchers above. Those work in BOTH modes.
+        ; What gets gated by Full mode is everything *else* - the editor, the
+        ; user-customizable workflows, the heavy background machinery.
 
-        try {
+        if (appMode = "full") {
+            LoadUsageStats()
+            LoadExpansionHistory()
+            SetupHotkeys()
+            SetTimer(SaveUsageStats, 60000)
+
             if (FileExist(launcherPath))
                 lastLauncherMod := FileGetTime(launcherPath, "M")
             else
@@ -212,15 +232,23 @@ SafeInitialize() {
                 lastExpMod := FileGetTime(textExpansionPath, "M")
             else
                 lastExpMod := 0
-        } catch {
-            ; Drive briefly unreachable at startup - watcher will pick up real times on its first poll
-            lastLauncherMod := 0
-            lastExpMod := 0
+            SetTimer(CheckFileTimes, config["Performance"]["FileWatchInterval"])
         }
-        SetTimer(CheckFileTimes, config["Performance"]["FileWatchInterval"])
 
         SetupTrayMenu()
         CheckFirstRun()
+        if (holdKeysNews)
+            SetTimer(ShowHoldKeysNews, -1500)   ; after start-up, so it doesn't block it
+
+        if (appMode = "full") {
+            TrayTip("MultiShortcuts v2.0.0 - Full",
+                "Online - " . loadedLaunchers.Count . " launchers, " .
+                loadedExpansions.Count . " expansions`nAuto-reload active", "Iconi")
+        } else {
+            starterMsg := "Ready! Built-in shortcuts work right away."
+            starterMsg .= "`nRight-click the tray icon to learn more."
+            TrayTip("MultiShortcuts v2.0.0 - Starter", starterMsg, "Iconi")
+        }
     } catch Error as err {
         MsgBox("Initialization failed: " . err.Message .
                "`n`nScript will continue in limited mode.", "Error", "Icon!")
@@ -231,191 +259,74 @@ SafeInitialize() {
 ; FIRST RUN SETUP
 ;------------------------------------------------
 CheckFirstRun() {
-    global prefsPath
+    global prefsPath, config, appMode, holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
     if (FileExist(prefsPath))
         return
 
-    ; First run - write the prefs file so this doesn't fire again,
-    ; then show a single orienting TrayTip pointing at the tray icon.
+    result := MsgBox(
+        "Welcome to MultiShortcuts!`n`n" .
+        "Would you like sound feedback when shortcuts fire?`n`n" .
+        "You can change this anytime from the tray menu.",
+        "First Run Setup", "YesNo Iconi")
+
+    if (result = "Yes") {
+        config["Feedback"]["PlaySounds"] := true
+        try A_TrayMenu.Check("Sound Feedback")
+    }
+
     try FileAppend("FirstRun=done`n", prefsPath)
+    if (holdKeysOn)
+        try IniWrite("1", prefsPath, "HoldKeys", "Enabled")
+    if (capsKeyOn)
+        try IniWrite("1", prefsPath, "HoldKeys", "CapsLock")
+    try IniWrite(mouseKeyOn ? mouseKeyMode : "0", prefsPath, "HoldKeys", "MiddleButton")
 
-    TrayTip("MultiShortcuts Pro is running",
-            "Try it: type  `c  anywhere and Claude opens." . "`n"
-          . "Alt+H for help.  Alt+R reloads if anything stops working.",
-            "Iconi")
-}
+    wc := config["Triggers"]["WinCmd"]
+    al := config["Triggers"]["AppLaunch"]
 
-;------------------------------------------------
-; LOCATION CHECK - DETECT TEMP/DOWNLOADS LOCATION AND OFFER TO RELOCATE
-;------------------------------------------------
-; Non-technical users often run scripts directly from their Downloads folder,
-; which is a fragile location - it can get cleaned automatically by Windows
-; Storage Sense, and re-downloads create copies that confuse the user about
-; which file holds their shortcut library.
-;
-; On first run, if we detect we're in such a location, we offer to copy
-; ourselves to Desktop\shortcuts\ and re-launch from there. This is opt-in
-; via dialog - users who know what they're doing can decline.
-;
-; Returns: true if we relocated (caller should exit immediately so the new
-; instance takes over). false if we're staying put.
-CheckRunningLocation() {
-    global prefsPath
-
-    ; Only run this check once. Use a separate flag from FirstRun because
-    ; we want to ask about location even if some prefs already exist.
-    if (FileExist(prefsPath)) {
-        try {
-            asked := IniRead(prefsPath, "Setup", "LocationChecked", "no")
-            if (asked = "yes")
-                return false
-        } catch {
-            ; If we can't read prefs, skip the check rather than block startup
-            return false
-        }
-    }
-
-    if (!IsInTempLocation(A_ScriptDir))
-        return false
-
-    ; We're in a temp-ish location. Ask the user.
-    msg := "MultiShortcuts Pro is running from:" . "`n`n"
-    msg .= "    " . A_ScriptDir . "`n`n"
-    msg .= "This is a temporary location. Files here can get cleaned up by "
-    msg .= "Windows automatically over time, and your shortcut library "
-    msg .= "lives alongside this script — so it would get lost too." . "`n`n"
-    msg .= "Move MultiShortcuts Pro to a folder on your Desktop?" . "`n`n"
-    msg .= "You can move the folder anywhere later — including OneDrive, "
-    msg .= "Dropbox, or Google Drive to sync your shortcuts across PCs."
-
-    result := MsgBox(msg, "First-Time Setup - Choose a Home",
-                     "YesNo Iconi 4096")
-
-    ; Mark that we've asked, regardless of answer, so we don't ask again
-    MarkLocationChecked()
-
-    if (result = "No")
-        return false
-
-    ; User said yes. Do the relocation.
-    return DoRelocate()
-}
-
-; Decides if a script directory looks like a temporary or fragile location.
-; Conservative: only flags well-known patterns. Avoids false positives on
-; folders the user picked intentionally.
-IsInTempLocation(dir) {
-    ; Normalize for comparison
-    d := StrLower(dir)
-
-    ; Common temporary or fragile locations
-    downloads := StrLower(A_MyDocuments . "\..\Downloads")
-    tmp       := StrLower(A_Temp)
-
-    if (InStr(d, "\downloads"))           ; e.g., C:\Users\X\Downloads
-        return true
-    if (InStr(d, A_Temp))                  ; Windows temp folder
-        return true
-    if (InStr(d, "\appdata\local\temp"))   ; alternate temp paths
-        return true
-    if (RegExMatch(d, "^[a-z]:\\?$"))      ; root of a drive, like C:\
-        return true
-
-    return false
-}
-
-MarkLocationChecked() {
-    global prefsPath
-    try {
-        ; Ensure the file exists first
-        if (!FileExist(prefsPath))
-            FileAppend("", prefsPath)
-        IniWrite("yes", prefsPath, "Setup", "LocationChecked")
-    }
-}
-
-; Performs the relocation: creates Desktop\shortcuts\, copies this script,
-; launches the new copy, and signals caller to exit. Returns true on success,
-; false if anything went wrong (in which case we keep running where we are).
-DoRelocate() {
-    ; Build destination path
-    targetDir := A_Desktop . "\MultiShortcuts Pro"
-
-    ; Handle the case where the folder already exists. Three scenarios:
-    ;   1. Folder exists and has a MultiShortcutsPro.ahk in it -> user
-    ;      already did this. Just launch the existing one and exit.
-    ;   2. Folder exists but is empty/different -> use a numbered variant
-    ;      so we don't trample.
-    ;   3. Folder doesn't exist -> create it fresh.
-    chosenDir := ""
-    if (DirExist(targetDir)) {
-        existingScript := targetDir . "\" . A_ScriptName
-        if (FileExist(existingScript)) {
-            ; Already relocated previously. Just launch it and bail.
-            try {
-                Run(existingScript)
-                MsgBox("MultiShortcuts Pro is already installed at:" . "`n`n"
-                       . targetDir . "`n`n"
-                       . "Launching that copy. You can delete the one in your "
-                       . "Downloads folder.",
-                       "Already Installed", "Iconi")
-                return true
-            } catch {
-                return false
-            }
-        }
-        ; Folder exists but doesn't have our script. Find a free name.
-        n := 2
-        while (DirExist(targetDir . " (" . n . ")") && n < 20)
-            n++
-        chosenDir := targetDir . " (" . n . ")"
+    if (appMode = "starter") {
+        MsgBox(
+            "You're running MultiShortcuts in Starter mode.`n`n" .
+            "Try these right now - they work anywhere you can type:`n`n" .
+            "  " . wc . "c  - Copy           " . wc . "v  - Paste`n" .
+            "  " . wc . "s  - Save           " . wc . "p  - Print`n" .
+            "  " . wc . "t  - Top of page    " . wc . "b  - Bottom`n" .
+            "  " . al . "S  - Snip Tool      " . al . "C  - Calculator`n" .
+            "  -=  - Today's date  1m=  - One month from now`n`n" .
+            "NEW - Ctrl and Alt, now on your home row:`n" .
+            "the same shortcuts, without the reach.`n" .
+            "`n" .
+            "SEMICOLON  -  hold it for Ctrl`n" .
+            "   hold `; + C = Copy,   hold `; + V = Paste`n" .
+            "`n" .
+            "CAPS LOCK  -  hold it for Alt, tap it for ```n" .
+            "   hold Caps Lock + Tab = switch windows`n" .
+            "   tap Caps Lock, then c = open Claude`n" .
+            "   Shift + Caps Lock = normal Caps Lock`n" .
+            "`n" .
+            "MIDDLE MOUSE BUTTON  -  works like `;`n" .
+            "   click it, then v = Paste`n" .
+            "   highlight, hold the wheel, tap C = Copy`n" .
+            "   Shift + middle click = normal middle click`n" .
+            "`n" .
+            "A quick tap of `; still types it, so your`n" .
+            "shortcuts work as before.`n" .
+            "Change any of this in the tray menu.`n" .
+            "`n" .
+            "When you want more - custom shortcuts, an editor GUI and more - `n" .
+            "right-click the tray icon and choose * Unlock Full Features.",
+            "MultiShortcuts - Starter Mode", "Iconi")
     } else {
-        chosenDir := targetDir
+        MsgBox(
+            "Quick Start (Full mode):`n`n" .
+            "  Alt+T  - Add a text expansion`n" .
+            "  Alt+A  - Add an app launcher`n" .
+            "  Alt+C  - Capture selected text`n" .
+            "  Alt+E  - Edit all shortcuts`n" .
+            "  Alt+H  - Help`n`n" .
+            "Right-click the tray icon for all options.",
+            "MultiShortcuts - Getting Started", "Iconi")
     }
-
-    ; Try to create the destination directory
-    try DirCreate(chosenDir)
-    catch Error as err {
-        MsgBox("Couldn't create the folder:" . "`n`n"
-               . chosenDir . "`n`n"
-               . "Reason: " . err.Message . "`n`n"
-               . "MultiShortcuts Pro will keep running from its current location. "
-               . "You can move the file manually anytime.",
-               "Couldn't Move", "Icon!")
-        return false
-    }
-
-    ; Copy this script to the new location
-    sourceFile := A_ScriptFullPath
-    targetFile := chosenDir . "\" . A_ScriptName
-    try FileCopy(sourceFile, targetFile, false)
-    catch Error as err {
-        MsgBox("Couldn't copy the script file." . "`n`n"
-               . "Reason: " . err.Message . "`n`n"
-               . "MultiShortcuts Pro will keep running from its current location.",
-               "Couldn't Move", "Icon!")
-        return false
-    }
-
-    ; Launch the new copy
-    try Run(targetFile)
-    catch Error as err {
-        MsgBox("The script was moved to:" . "`n`n"
-               . chosenDir . "`n`n"
-               . "But it couldn't auto-launch. Please go to that folder and "
-               . "double-click MultiShortcutsPro.ahk to start.",
-               "Move Complete", "Iconi")
-        return true  ; Still consider it a successful relocate
-    }
-
-    ; Notify user, then signal caller to exit so the new copy takes over
-    MsgBox("MultiShortcuts Pro is now installed at:" . "`n`n"
-           . chosenDir . "`n`n"
-           . "Tip: drag this whole folder to OneDrive, Dropbox, or Google Drive "
-           . "if you want your shortcuts to sync across PCs." . "`n`n"
-           . "You can also delete the original file in your Downloads folder.",
-           "Welcome to MultiShortcuts Pro", "Iconi")
-    return true
 }
 
 SetupHotkeys() {
@@ -437,6 +348,7 @@ SetupHotkeys() {
         Hotkey(hk["ShowHelp"],            (*) => ShowHelp())
         Hotkey(hk["PauseResume"],         (*) => ToggleMacrosPause(), "S")
         Hotkey(hk["UndoExpansion"],       (*) => UndoLastExpansion())
+        Hotkey(hk["SnipTool"],            (*) => Send("#+s"))
     } catch Error as err {
         MsgBox("Hotkey setup error: " . err.Message, "Warning", "Icon!")
     }
@@ -451,8 +363,47 @@ HotkeyLabel(raw) {
 }
 
 SetupTrayMenu() {
-    global config
+    global appMode
     A_TrayMenu.Delete()
+    if (appMode = "starter") {
+        SetupStarterTrayMenu()
+    } else {
+        SetupFullTrayMenu()
+    }
+    UpdateTrayTooltip()
+}
+
+SetupStarterTrayMenu() {
+    global config, holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu
+    A_TrayMenu.Add("MultiShortcuts (Starter)", (*) => 0)
+    A_TrayMenu.Disable("MultiShortcuts (Starter)")
+    A_TrayMenu.Add()
+    A_TrayMenu.Add("Show Built-in Shortcuts",  (*) => ShowHelp())
+    A_TrayMenu.Add("Trigger Keys Setup...",      (*) => ShowTriggerSetup())
+    A_TrayMenu.Add(holdKeysMenu,                 ToggleHoldKeys)
+    A_TrayMenu.Add(capsKeyMenu,                  ToggleCapsKey)
+    A_TrayMenu.Add("Middle mouse button", BuildMouseMenu())
+    A_TrayMenu.Add("Hold Keys Timing...",        SetHoldKeysTime)
+    if (holdKeysOn)
+        A_TrayMenu.Check(holdKeysMenu)
+    if (capsKeyOn)
+        A_TrayMenu.Check(capsKeyMenu)
+    A_TrayMenu.Add()
+    A_TrayMenu.Add("* Unlock Full Features",   (*) => UnlockFullMode())
+    A_TrayMenu.Add()
+    A_TrayMenu.Add("Run on Windows Startup",   (*) => ToggleStartup())
+    A_TrayMenu.Add("Sound Feedback",           (*) => ToggleSounds())
+    A_TrayMenu.Add("Reload Script",            (*) => Reload())
+    A_TrayMenu.Add("Exit",                     (*) => ExitApp())
+    A_TrayMenu.Default := "Show Built-in Shortcuts"
+    if (FileExist(GetStartupLinkPath()))
+        A_TrayMenu.Check("Run on Windows Startup")
+    if (config["Feedback"]["PlaySounds"])
+        A_TrayMenu.Check("Sound Feedback")
+}
+
+SetupFullTrayMenu() {
+    global holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu
     A_TrayMenu.Add("Show Help",               (*) => ShowHelp())
     A_TrayMenu.Add("Edit Shortcuts (Alt+E)",  (*) => ShowEditGUI("launchers"))
     A_TrayMenu.Add()
@@ -461,6 +412,7 @@ SetupTrayMenu() {
     A_TrayMenu.Add("Add Document (Alt+D)",          (*) => AddDocumentLauncher())
     A_TrayMenu.Add("Add Web/Email (Alt+W)",         (*) => AddWebLauncher())
     A_TrayMenu.Add("Capture Selection (Alt+C)",     (*) => CaptureSelectedText())
+    A_TrayMenu.Add("Snip Tool (Alt+Shift+S)",        (*) => Send("#+s"))
     A_TrayMenu.Add()
     A_TrayMenu.Add("Quick Expansion Picker (Alt+Q)", (*) => QuickTextExpansion())
     A_TrayMenu.Add("Undo Last Expansion (Alt+Z)",    (*) => UndoLastExpansion())
@@ -473,6 +425,14 @@ SetupTrayMenu() {
     A_TrayMenu.Add("Run on Windows Startup",  (*) => ToggleStartup())
     A_TrayMenu.Add("Sound Feedback",          (*) => ToggleSounds())
     A_TrayMenu.Add("Trigger Keys Setup...",     (*) => ShowTriggerSetup())
+    A_TrayMenu.Add(holdKeysMenu,                ToggleHoldKeys)
+    A_TrayMenu.Add(capsKeyMenu,                 ToggleCapsKey)
+    A_TrayMenu.Add("Middle mouse button", BuildMouseMenu())
+    A_TrayMenu.Add("Hold Keys Timing...",       SetHoldKeysTime)
+    if (holdKeysOn)
+        A_TrayMenu.Check(holdKeysMenu)
+    if (capsKeyOn)
+        A_TrayMenu.Check(capsKeyMenu)
     A_TrayMenu.Add("Pause/Resume (Alt+P)",    (*) => ToggleMacrosPause())
     A_TrayMenu.Add("Reload Script",           (*) => Reload())
     A_TrayMenu.Add("Exit",                    (*) => ExitApp())
@@ -481,26 +441,18 @@ SetupTrayMenu() {
         A_TrayMenu.Check("Run on Windows Startup")
     if (config["Feedback"]["PlaySounds"])
         A_TrayMenu.Check("Sound Feedback")
-    SetAppIcon()
-    UpdateTrayTooltip()
-}
-
-; Use a custom icon if MultiShortcutsPro.ico sits beside the script; otherwise
-; the classic AutoHotkey green H (icon 1 in the interpreter exe).
-SetAppIcon() {
-    icoPath := A_ScriptDir . "\MultiShortcutsPro.ico"
-    try {
-        if (FileExist(icoPath))
-            TraySetIcon(icoPath)
-        else
-            TraySetIcon(A_AhkPath, 1)
-    }
 }
 
 UpdateTrayTooltip() {
-    global loadedLaunchers, loadedExpansions
+    global loadedLaunchers, loadedExpansions, appMode
+    if (appMode = "starter") {
+        A_IconTip := "MultiShortcuts (Starter) v2.0.0" .
+                     "`nBuilt-in trigger families active" .
+                     "`nRight-click for menu - Unlock Full when ready"
+        return
+    }
     status   := A_IsSuspended ? "PAUSED" : "Active"
-    A_IconTip := "MultiShortcuts Pro (" . status . ")"
+    A_IconTip := "MultiShortcuts (Full) v2.0.0 (" . status . ")"
               . "`nLaunchers: "  . loadedLaunchers.Count
               . "   Expansions: " . loadedExpansions.Count
 }
@@ -508,6 +460,45 @@ UpdateTrayTooltip() {
 ;------------------------------------------------
 ; SHARED HELPERS
 ;------------------------------------------------
+; Record the current file times after this script writes a data file, so
+; the file watcher doesn't treat our own save as an external change and
+; reload the whole script.
+MarkOwnWrite() {
+    global launcherPath, textExpansionPath, lastLauncherMod, lastExpMod
+    try lastLauncherMod := FileExist(launcherPath) ? FileGetTime(launcherPath, "M") : 0
+    try lastExpMod      := FileExist(textExpansionPath) ? FileGetTime(textExpansionPath, "M") : 0
+}
+
+; A lock file older than 30 seconds is assumed to be left over from a
+; crash or power cut - no real save takes that long.
+IsStaleLock(lockPath) {
+    try return DateDiff(A_Now, FileGetTime(lockPath, "M"), "Seconds") > 30
+    return false
+}
+
+; Waits up to 5 seconds for another save to finish, then creates the lock.
+; Returns false if the file is still locked (caller must not write).
+AcquireLock(lockPath) {
+    retries := 50    ; 5 s - allows for OneDrive/Dropbox sync delays
+    while (FileExist(lockPath) && retries > 0) {
+        if (IsStaleLock(lockPath)) {
+            try FileDelete(lockPath)
+            break
+        }
+        Sleep(100)
+        retries--
+    }
+    if (FileExist(lockPath))
+        return false
+    try FileAppend("", lockPath, "UTF-8")
+    return true
+}
+
+; Data files store one entry per line; real newlines become [NEWLINE]
+EncodeNewlines(text) {
+    return StrReplace(StrReplace(text, "`r`n", "`n"), "`n", "[NEWLINE]")
+}
+
 CheckShortcutConflict(shortcut, existingMap) {
     if (!existingMap.Has(shortcut))
         return true
@@ -554,7 +545,20 @@ SaveEntry(filePath, shortcut, target, reloadFn, successTitle, successMsg) {
             ownerMap[shortcut] := target
             RewriteFile(filePath, ownerMap, ownerHeader)
         } else {
-            LockedFileAppend(filePath, shortcut . " " . StrReplace(target, "`n", "[NEWLINE]") . "`n")
+            LockedFileAppend(filePath, shortcut . " " . EncodeNewlines(target) . "`n")
+        }
+        ; "Overwrite it everywhere": if the same trigger also exists in the
+        ; other file, remove it there so two hotstrings don't fight over it.
+        if (filePath = launcherPath && loadedExpansions.Has(shortcut)) {
+            loadedExpansions.Delete(shortcut)
+            RewriteFile(textExpansionPath, loadedExpansions,
+                        "; Text Expansion file - Format: shortcut expansion")
+            LoadTextExpansions()
+        } else if (filePath = textExpansionPath && loadedLaunchers.Has(shortcut)) {
+            loadedLaunchers.Delete(shortcut)
+            RewriteFile(launcherPath, loadedLaunchers,
+                        "; Launcher file - Format: shortcut target")
+            LoadLaunchers()
         }
         reloadFn.Call()
         TrayTip(successTitle, successMsg, "Iconi")
@@ -566,44 +570,50 @@ SaveEntry(filePath, shortcut, target, reloadFn, successTitle, successMsg) {
 }
 
 RewriteFile(filePath, dataMap, headerComment) {
-    global config
+    global config, textExpansionPath, instantExpansions
     lockPath := filePath . ".lock"
     tempPath := filePath . ".tmp"
     backPath := filePath . ".bak"
+    ; Never write while another save holds the lock (and never delete
+    ; someone else's lock)
+    if (!AcquireLock(lockPath)) {
+        MsgBox("Could not save - the file is locked:`n" . filePath .
+               "`n`nIf this keeps happening, delete the file:`n" . lockPath,
+               "Save Failed", "Icon!")
+        return false
+    }
     try {
         if (config["TextExpander"]["BackupOnSave"])
             BackupFile(filePath)
         content := headerComment . "`n"
-        for shortcut, target in dataMap
-            content .= shortcut . " " . StrReplace(target, "`n", "[NEWLINE]") . "`n"
-        retries := 10
-        while (FileExist(lockPath) && retries > 0) {
-            Sleep(100)
-            retries--
+        for shortcut, target in dataMap {
+            key := shortcut
+            ; Keep the $$ instant-fire marker on expansions that had it
+            if (filePath = textExpansionPath && instantExpansions.Has(shortcut))
+                key .= "$$"
+            content .= key . " " . EncodeNewlines(target) . "`n"
         }
-        FileAppend("", lockPath, "UTF-8")
         try {
             ; Write to temp first
             if (FileExist(tempPath))
                 FileDelete(tempPath)
             FileAppend(content, tempPath, "UTF-8")
-            ; Keep backup of original in case copy fails
+            ; Keep backup of original in case the replace fails
             if (FileExist(filePath))
                 FileCopy(filePath, backPath, 1)
-            ; Overwrite original with temp (FileCopy is safer than delete+move)
             ; Atomic OS-level file replacement - safe against power loss/crash
             if (!DllCall("ReplaceFile",
                     "Str", filePath, "Str", tempPath, "Ptr", 0,
                     "UInt", 1, "Ptr", 0, "Ptr", 0)) {
-                ; Fallback to FileCopy if ReplaceFile fails (e.g. file doesn't exist yet)
+                ; Fallback if ReplaceFile fails (e.g. file doesn't exist yet)
                 FileCopy(tempPath, filePath, 1)
             }
-            ; Clean up
             try FileDelete(tempPath)
             try FileDelete(backPath)
         } finally {
             try FileDelete(lockPath)
         }
+        MarkOwnWrite()
         return true
     } catch Error as err {
         try FileDelete(lockPath)
@@ -619,24 +629,19 @@ RewriteFile(filePath, dataMap, headerComment) {
 
 LockedFileAppend(filePath, content) {
     lockPath := filePath . ".lock"
-    retries := 10
-    while (FileExist(lockPath) && retries > 0) {
-        Sleep(100)
-        retries--
-    }
-    ; Fix 6: if lock file still exists after retries, alert user instead of silent fail
-    if (FileExist(lockPath)) {
+    if (!AcquireLock(lockPath)) {
         MsgBox("Could not save - the file is locked:`n" . filePath .
                "`n`nIf this keeps happening, delete the file:`n" . lockPath,
                "Save Failed", "Icon!")
-        return
+        return false
     }
-    try FileAppend("", lockPath, "UTF-8")
     try {
         FileAppend(content, filePath, "UTF-8")
     } finally {
         try FileDelete(lockPath)
     }
+    MarkOwnWrite()
+    return true
 }
 
 PromptShortcut(prompt, title) {
@@ -724,17 +729,8 @@ AddNewLauncher() {
                                "Applications (*.exe; *.lnk)")
     if (selectedFile = "")
         return
-    ; Resolve .lnk shortcut files to their real target before validation
-    ; A .lnk could point to cmd.exe or powershell.exe with arguments
-    targetToValidate := selectedFile
-    if (StrLower(SubStr(selectedFile, -4)) = ".lnk") {
-        try {
-            FileGetShortcut(selectedFile, &lnkTarget)
-            if (lnkTarget != "")
-                targetToValidate := lnkTarget
-        }
-    }
-    if (!IsAllowedTarget(targetToValidate))
+    ; IsAllowedTarget resolves .lnk files and checks what they point to
+    if (!IsAllowedTarget(selectedFile))
         return
     SaveEntry(launcherPath, shortcut, selectedFile, LoadLaunchers,
               "App Launcher Added", shortcut . " -> " . selectedFile)
@@ -760,98 +756,156 @@ AddDocumentLauncher() {
 }
 
 ;----------------------------------------------
-; Is Allowed
-;---------------------------------------------
-IsAllowedTarget(target) {
-    global config
-    ; Normalise: strip leading/trailing whitespace and quotes, lowercase for comparison
-    cleaned := StrLower(Trim(target, " `t`"'"))
+; TARGET VALIDATION
+;----------------------------------------------
+; Splits a launcher target into the program/file path and any arguments.
+; Handles quoted paths, unquoted paths containing spaces
+; (C:\Program Files (x86)\App\app.exe --flag) and bare names (calc.exe).
+SplitTarget(t, &path, &args) {
+    t    := Trim(t)
+    path := t
+    args := ""
+    if (RegExMatch(t, '^"([^"]+)"\s*(.*)$', &m)) {
+        path := m[1]
+        args := m[2]
+        return
+    }
+    if (FileExist(t))
+        return
+    ; Unquoted path followed by arguments: find the shortest prefix
+    ; (ending at a space) that is an existing file.
+    pos := 0
+    while (pos := InStr(t, " ", , pos + 1)) {
+        cand := SubStr(t, 1, pos - 1)
+        attr := FileExist(cand)
+        if (attr != "" && !InStr(attr, "D")) {
+            path := cand
+            args := LTrim(SubStr(t, pos + 1))
+            return
+        }
+    }
+    ; File not present right now (e.g. offline drive) - split after .exe/.lnk
+    if (RegExMatch(t, "i)^(.+?\.(?:exe|lnk))\s+(.*)$", &m)) {
+        path := m[1]
+        args := m[2]
+    }
+}
 
-    ; Block environment variable injection patterns like %comspec%
+; Returns true if a launcher target is safe to save (action = "add") or
+; to run (action = "launch"). Launchers are checked again every time they
+; fire, so a target written into launchers.ahk by anything other than this
+; script (a sync conflict, another program, a hand edit) is still checked.
+IsAllowedTarget(target, action := "add", depth := 0) {
+    global config
+    raw     := Trim(target)
+    cleaned := StrLower(raw)
+    verb    := (action = "launch") ? "launch" : "add"
+
+    if (cleaned = "")
+        return false
+
+    ; Block environment variable references like %comspec%
     if (RegExMatch(cleaned, "%\w+%")) {
         MsgBox("Environment variable references (e.g. %comspec%) are not permitted.`n" .
-               "Use a full path instead.",
+               "Use a full path instead.`n`n" . raw,
                "Security Block", "Icon!")
         return false
     }
 
-    ; Block shell metacharacters that could enable command injection
-    ; BUT only for file/executable targets - URLs legitimately contain & ? # ( ) etc.
-    isUrl := (SubStr(cleaned, 1, 7) = "http://" || SubStr(cleaned, 1, 8) = "https://"
-           || SubStr(cleaned, 1, 7) = "mailto:" || SubStr(cleaned, 1, 6) = "ftp://")
-    if (!isUrl && (RegExMatch(cleaned, "[&;``><|$()#?*]"))) {
-        MsgBox("Shell metacharacters are not permitted in launcher targets.`nUse a direct file path without command chaining.",
+    ; Web and email links open in the browser / mail client
+    if (RegExMatch(cleaned, "^(https?://|mailto:|ftp://)"))
+        return true
+
+    ; Protocol handlers such as ms-screenclip:  (two or more letters, so a
+    ; drive letter like C: is not mistaken for a protocol)
+    if (RegExMatch(cleaned, "^([a-z][a-z0-9+.\-]+):", &pm)) {
+        for , proto in config["Security"]["BlockedProtocols"] {
+            if (pm[1] = proto) {
+                MsgBox("Blocked protocol: '" . proto . ":'`n" .
+                       "Only web links, email, normal programs, documents and folders are permitted.`n`n" . raw,
+                       "Security Block", "Icon!")
+                return false
+            }
+        }
+        return true
+    }
+
+    ; Local program, document or folder
+    SplitTarget(raw, &path, &args)
+
+    ; Run() does not go through a command shell, so these characters can't
+    ; chain commands - but there's no legitimate reason for them in launcher
+    ; arguments, so refuse them as a precaution.
+    if (args != "" && RegExMatch(args, "[&|<>]")) {
+        MsgBox("The characters & | < > are not permitted in launcher arguments.`n`n" . raw,
                "Security Block", "Icon!")
         return false
     }
 
-    ; Block dangerous protocols
-    ; Strip interior whitespace from the leading portion before checking, so
-    ; tricks like "ms-msdt :foo" or "cmd  :bar" can't slip past the regex.
-    for , proto in config["Security"]["BlockedProtocols"] {
-        normalized := RegExReplace(cleaned, "\s+", "")
-        if (RegExMatch(normalized, "^" . proto . ":")) {
-            MsgBox("Blocked protocol: '" . proto . "'.`n" .
-                   "Only http/https/mailto and normal file paths are permitted.",
-                   "Security Block", "Icon!")
-            return false
+    if (DirExist(path))
+        return true    ; folders open in File Explorer
+
+    SplitPath(path, &fileName, , &ext)
+    ext := StrLower(ext)
+    allowed := false
+    for , okExt in config["Security"]["AllowedExtensions"] {
+        if (ext = okExt) {
+            allowed := true
+            break
         }
     }
-
-    ; Block dangerous script file extensions including AHK itself
-    blockedExts := [".bat", ".cmd", ".ps1", ".vbs", ".wsf", ".hta", ".ahk", ".ah2"]
-    for , ext in blockedExts {
-        if (RegExMatch(cleaned, "\Q" . ext . "\E(\s|$)")) {
-            MsgBox("File type '" . ext . "' is not permitted as a launcher target.`n" .
-                   "Use a .exe or a folder path instead.",
-                   "Security Block", "Icon!")
-            return false
-        }
+    if (!allowed) {
+        MsgBox("File type '" . (ext = "" ? "(none)" : "." . ext) . "' is not permitted as a launcher target.`n`n" .
+               "Launchers can open programs (.exe), shortcuts (.lnk), common documents, " .
+               "media files and folders. Scripts and installers are blocked.`n`n" . raw,
+               "Security Block", "Icon!")
+        return false
     }
 
-    ; Warn on dangerous system executables if ConfirmDangerousTargets is enabled
+    ; A .lnk can point anywhere - check what it actually opens
+    if (ext = "lnk" && depth < 2) {
+        lnkTarget := ""
+        try FileGetShortcut(path, &lnkTarget)
+        ; If Windows can't read the .lnk (deleted, or an advertised Start
+        ; menu shortcut), FileGetShortcut leaves lnkTarget unset - carry on
+        ; instead of crashing. A missing file is reported at launch.
+        if (IsSet(lnkTarget) && lnkTarget != "" && StrLower(lnkTarget) != StrLower(path))
+            return IsAllowedTarget(lnkTarget, action, depth + 1)
+        return true
+    }
+
+    ; Ask before adding or running powerful system tools
     if (config["Security"]["ConfirmDangerousTargets"]) {
-        ; Use SplitPath to extract just the executable filename
-        ; This catches "C:\Windows\System32\cmd.exe /c del *.*" style bypasses
-        exeTarget := cleaned
-        if (SubStr(cleaned, 1, 1) = '"') {
-            ; Quoted path - extract content between first pair of quotes
-            if (RegExMatch(cleaned, '^"([^"]+)"', &m))
-                exeTarget := m[1]
-        } else {
-            ; Unquoted - take everything before first space (the exe path)
-            exeTarget := StrSplit(cleaned, " ")[1]
-        }
-        SplitPath(exeTarget, &outFileName)
-        cleanedExe := StrLower(outFileName)
-
         dangerousExes := ["cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe",
                           "cscript.exe", "mshta.exe", "regsvr32.exe", "rundll32.exe",
-                          "msiexec.exe", "wmic.exe", "forfiles.exe", "regedit.exe"]
-        dangerousDirs := ["system32", "syswow64", "sysnative"]
+                          "msiexec.exe", "wmic.exe", "forfiles.exe", "regedit.exe",
+                          "certutil.exe", "bitsadmin.exe", "schtasks.exe", "reg.exe"]
         isDangerous := false
-
-        ; Check by exact executable filename
+        lowName := StrLower(fileName)
         for , exe in dangerousExes {
-            if (cleanedExe = exe) {
+            if (lowName = exe) {
                 isDangerous := true
                 break
             }
         }
-        ; Also check by directory path
-        if (!isDangerous) {
-            for , dir in dangerousDirs {
-                if (InStr(StrLower(exeTarget), "\" . dir . "\")) {
+        ; When adding, also flag anything else inside the Windows system
+        ; folders. (Not checked on every launch - it would nag about
+        ; ordinary tools like notepad.exe.)
+        if (!isDangerous && action != "launch") {
+            for , dir in ["\system32\", "\syswow64\", "\sysnative\"] {
+                if (InStr(StrLower(path), dir)) {
                     isDangerous := true
                     break
                 }
             }
         }
         if (isDangerous) {
-            result := MsgBox("Warning: This target appears to be a sensitive system executable.`n`n" .
-                             target . "`n`nAre you sure you want to add this launcher?",
-                             "Security Warning", "YesNo Icon!")
-            if (result != "Yes")
+            question := (verb = "launch")
+                ? "Are you sure you want to run it?"
+                : "Are you sure you want to add this launcher?"
+            if (MsgBox("Warning: This target is a powerful system program.`n`n" .
+                       raw . "`n`n" . question,
+                       "Security Warning", "YesNo Icon!") != "Yes")
                 return false
         }
     }
@@ -862,13 +916,6 @@ IsAllowedTarget(target) {
 ;---------------------------------------------
 AddWebLauncher() {
     global launcherPath, loadedLaunchers
-
-    ; Try to auto-capture a URL from whatever's currently focused.
-    ; This works best when the user has clicked into a browser's address bar
-    ; before pressing Alt+W. We do this BEFORE any dialog opens, because once
-    ; the dialog opens it steals focus away from the browser.
-    capturedUrl := TryCaptureUrl()
-
     shortcut := PromptShortcut(
         "Enter trigger name:`n`nExample: 'gmail' or 'news'",
         "Web/Email Launcher")
@@ -876,22 +923,9 @@ AddWebLauncher() {
         return
     if (!CheckGlobalConflict(shortcut))
         return
-
-    ; Pre-fill the URL field with the captured URL if it looks valid,
-    ; otherwise use the default "https://" placeholder.
-    ; The prompt text changes too — explicit feedback when capture succeeded
-    ; makes the "magic" moment understandable instead of mysterious.
-    if (capturedUrl != "") {
-        promptText := "Captured this URL from your browser:`n`n"
-                    . "Press OK to add it as a launcher, or edit first "
-                    . "if you want a different URL."
-        defaultUrl := capturedUrl
-    } else {
-        promptText := "Enter URL or Email address:`n`nExamples:`n"
-                    . "https://gmail.com`njohn@example.com"
-        defaultUrl := "https://"
-    }
-    I2 := InputBox(promptText, "Target Address", "w400 h160", defaultUrl)
+    I2 := InputBox(
+        "Enter URL or Email address:`n`nExamples:`nhttps://gmail.com`njohn@example.com",
+        "Target Address", "w400 h160", "https://")
     if (I2.Result = "Cancel" || I2.Value = "")
         return
     target := Trim(I2.Value)
@@ -909,55 +943,6 @@ AddWebLauncher() {
         return
     SaveEntry(launcherPath, shortcut, target, LoadLaunchers,
               "Web Launcher Added", shortcut . " -> " . target)
-}
-
-;------------------------------------------------
-; URL CAPTURE FROM ACTIVE WINDOW
-;------------------------------------------------
-; Attempts to capture a URL from whatever text field currently has focus.
-; The intended use is: user clicks into a browser's address bar, then presses
-; Alt+W. We fire Ctrl+A to select all the address-bar content, then Ctrl+C
-; to copy it to the clipboard, then read the clipboard.
-;
-; To be polite, we save and restore the user's original clipboard content
-; so they don't lose something they had in there.
-;
-; Returns the captured URL if it looks valid (starts with http://, https://,
-; or contains :// or @). Returns empty string otherwise.
-TryCaptureUrl() {
-    ; Save existing clipboard so we can restore it
-    originalClip := A_Clipboard
-    A_Clipboard := ""
-
-    ; Try to grab the contents of the focused field
-    try {
-        Send("^a")
-        Sleep(50)
-        Send("^c")
-    }
-
-    ; Wait briefly for the clipboard to update (up to 300ms)
-    captured := ""
-    if (ClipWait(0.3, 0)) {
-        captured := Trim(A_Clipboard)
-    }
-
-    ; Restore the user's original clipboard content
-    A_Clipboard := originalClip
-
-    ; Validate that what we captured looks like a URL or email
-    if (captured = "")
-        return ""
-    if (RegExMatch(captured, "^https?://"))
-        return captured
-    if (RegExMatch(captured, "i)^[a-z]+://"))     ; other schemes like ftp:// mailto:
-        return captured
-    if (InStr(captured, "@") && !InStr(captured, " "))     ; looks like an email
-        return captured
-
-    ; Doesn't look like a URL - might be a Word doc selection, etc.
-    ; Don't pre-fill, let user type from scratch.
-    return ""
 }
 
 AddNewExpansion() {
@@ -1137,7 +1122,7 @@ QuickTextExpansion() {
             gPick.Destroy()
             Sleep(80)
             expansion := loadedExpansions[sc]
-            RecordExpansionHistory(sc, sc, expansion)
+            RecordExpansionHistory(sc, sc, StrLen(expansion))
             SendText(expansion)
             TrackUsage(sc, "expansion")
         }
@@ -1174,8 +1159,15 @@ UndoLastExpansion() {
     }
     last     := expansionHistory[expansionHistory.Length]
     original := last["shortcut"]
-    ; Use stored length + 1 for trailing space added by SendExpandText
-    delCount := last.Has("length") ? last["length"] + 1 : StrLen(original) + 1
+    delCount := last.Has("length") ? last["length"] : -1
+    if (delCount < 0) {
+        expansionHistory.Pop()
+        SaveExpansionHistory()
+        TrayTip("Can't Undo",
+                "'" . original . "' sent keystrokes or moved the cursor, so it can't be undone automatically.",
+                "Iconi")
+        return
+    }
     Send("{BS " . delCount . "}")
     Sleep(30)
     SendText(original)
@@ -1184,15 +1176,19 @@ UndoLastExpansion() {
     TrayTip("Undone", "Restored '" . original . "'", "Iconi")
 }
 
-RecordExpansionHistory(shortcut, original, expanded) {
-    global expansionHistory, config
+; typedLength = exact number of characters typed (including any trailing
+; space), or -1 when the expansion can't be undone by backspacing.
+RecordExpansionHistory(shortcut, original, typedLength) {
+    global expansionHistory, config, appMode
+    if (appMode != "full")
+        return    ; Undo is a Full-mode feature - don't write history in Starter
     maxSize := config["TextExpander"]["MaxHistorySize"]
     ; Store only shortcut + timestamp + length - NOT the expanded text
     ; This protects patient data, private messages, and sensitive content
     expansionHistory.Push(Map(
         "shortcut", shortcut,
         "original", original,
-        "length",   StrLen(expanded),
+        "length",   typedLength,
         "time",     A_Now
     ))
     while (expansionHistory.Length > maxSize)
@@ -1426,6 +1422,54 @@ EscapeCSV(val) {
 ;------------------------------------------------
 ; IMPORT FROM CSV
 ;------------------------------------------------
+; Splits one CSV line into fields, honouring "quoted, fields" and "" escapes
+ParseCSVLine(line) {
+    fields := []
+    field  := ""
+    inQ    := false
+    i      := 1
+    n      := StrLen(line)
+    while (i <= n) {
+        ch := SubStr(line, i, 1)
+        if (inQ) {
+            if (ch = '"') {
+                if (SubStr(line, i + 1, 1) = '"') {
+                    field .= '"'
+                    i += 2
+                    continue
+                }
+                inQ := false
+            } else {
+                field .= ch
+            }
+        } else if (ch = '"') {
+            inQ := true
+        } else if (ch = ",") {
+            fields.Push(field)
+            field := ""
+        } else {
+            field .= ch
+        }
+        i++
+    }
+    fields.Push(field)
+    ; Hand-made files may leave commas in the last column unquoted
+    while (fields.Length > 3) {
+        last := fields.Pop()
+        fields[fields.Length] .= "," . last
+    }
+    return fields
+}
+
+; Reverses what EscapeCSV did on export
+UnescapeCSVValue(val) {
+    ; Export prefixes ' to values starting with = @ + - (spreadsheet
+    ; formula guard). Remove it so -= comes back as -= and not '-=.
+    if (RegExMatch(val, "^'[=@+\-]"))
+        val := SubStr(val, 2)
+    return StrReplace(val, "[NEWLINE]", "`n")
+}
+
 ImportFromCSV() {
     global loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath
     ; Warn user about trusted sources before importing
@@ -1440,34 +1484,40 @@ ImportFromCSV() {
     if (filePath = "")
         return
 
-    ; ── Pre-scan pass: count expansions that contain risky sequence tokens
-    ; before importing anything. {key:...} sends raw keystrokes - an
-    ; imported expansion with {key:#r} would open Run, {key:^w} would close
-    ; the active window, etc. We don't block, but we make the user aware.
-    riskyCount := 0
-    riskySamples := []
     try {
-        for line in StrSplit(FileRead(filePath, "UTF-8"), "`n", "`r") {
-            line := Trim(line)
-            if (line = "" || SubStr(line, 1, 4) = "Type")
-                continue
-            parts := StrSplit(line, ",", , 3)
-            if (parts.Length < 3)
-                continue
-            if (Trim(parts[1]) = "Expansion") {
-                val := StrReplace(parts[3], '"', "")
-                if (InStr(val, "{key:") || InStr(val, "{focus:")) {
-                    riskyCount++
-                    if (riskySamples.Length < 3)
-                        riskySamples.Push(Trim(StrReplace(parts[2], '"', "")))
-                }
-            }
+        lines := StrSplit(FileRead(filePath, "UTF-8"), "`n", "`r")
+    } catch Error as err {
+        MsgBox("Could not read the file: " . err.Message, "Import Failed", "Icon!")
+        return
+    }
+
+    ; ── Pre-scan: count expansions that send keystrokes or switch windows.
+    ; {key:...} sends raw keystrokes - an imported {key:#r} would open Run,
+    ; {key:^w} would close the active window, etc. Make the user aware.
+    riskyCount   := 0
+    riskySamples := []
+    for i, line in lines {
+        line := Trim(line)
+        if (line = "" || (i = 1 && InStr(line, "Type,Shortcut")))
+            continue
+        f := ParseCSVLine(line)
+        if (f.Length < 3 || Trim(f[1]) != "Expansion")
+            continue
+        ; Shortcuts you already have are skipped on import (including the
+        ; built-in ; and = families), so they aren't a risk - don't count them
+        sc := UnescapeCSVValue(Trim(f[2]))
+        if (loadedExpansions.Has(sc) || loadedLaunchers.Has(sc))
+            continue
+        if (InStr(f[3], "{key:") || InStr(f[3], "{focus:")) {
+            riskyCount++
+            if (riskySamples.Length < 3)
+                riskySamples.Push(sc)
         }
     }
     if (riskyCount > 0) {
         sampleList := ""
-        for , s in riskySamples
-            sampleList .= "  * " . s . "`n"
+        for , smp in riskySamples
+            sampleList .= "  * " . smp . "`n"
         if (riskyCount > riskySamples.Length)
             sampleList .= "  * ...and " . (riskyCount - riskySamples.Length) . " more`n"
         warn := riskyCount . " expansion(s) in this CSV send keystrokes or activate "
@@ -1480,59 +1530,56 @@ ImportFromCSV() {
             return
     }
 
-    try {
-        content  := FileRead(filePath, "UTF-8")
-        lines    := StrSplit(content, "`n", "`r")
-        imported := 0
-        skipped  := 0
-        for i, line in lines {
-            if (i = 1 && InStr(line, "Type,Shortcut"))
-                continue
-            line := Trim(line)
-            if (line = "")
-                continue
-            parts := StrSplit(line, ",", , 3)
-            if (parts.Length < 3) {
-                skipped++
-                continue
-            }
-            type := Trim(parts[1])
-            sc   := Trim(StrReplace(parts[2], '"', ""))
-            val  := Trim(StrReplace(parts[3], '"', ""))
-            ; Reverse EscapeCSV's formula-injection guard: it prefixes ' before
-            ; cells starting with = @ + -. Strip that ' back off on import so
-            ; shortcuts like =- (short date) round-trip through CSV cleanly.
-            if (SubStr(sc,  1, 1) = "'" && RegExMatch(SubStr(sc,  2, 1), "[=@+\-]"))
-                sc  := SubStr(sc,  2)
-            if (SubStr(val, 1, 1) = "'" && RegExMatch(SubStr(val, 2, 1), "[=@+\-]"))
-                val := SubStr(val, 2)
-            ; Restore [NEWLINE] tokens to actual newlines (written by EscapeCSV)
-            val  := StrReplace(val, "[NEWLINE]", "`n")
-            if (!IsValidShortcut(sc, false)) {
-                skipped++
-                continue
-            }
-            if (type = "Launcher" && !loadedLaunchers.Has(sc)) {
-                if (!IsAllowedTarget(val)) {
-                    skipped++
-                } else {
-                    FileAppend(sc . " " . StrReplace(val, "`n", "[NEWLINE]") . "`n", launcherPath)
-                    imported++
-                }
-            } else if (type = "Expansion" && !loadedExpansions.Has(sc)) {
-                FileAppend(sc . " " . StrReplace(val, "`n", "[NEWLINE]") . "`n", textExpansionPath)
+    imported := 0
+    skipped  := 0
+    seen     := Map()   ; avoid adding the same trigger twice from one file
+    for i, line in lines {
+        line := Trim(line)
+        if (line = "" || (i = 1 && InStr(line, "Type,Shortcut")))
+            continue
+        f := ParseCSVLine(line)
+        if (f.Length < 3) {
+            skipped++
+            continue
+        }
+        type := Trim(f[1])
+        sc   := UnescapeCSVValue(Trim(f[2]))
+        val  := UnescapeCSVValue(f[3])
+        if (type = "Launcher")
+            val := Trim(val)
+        if (!IsValidShortcut(sc, false) || Trim(val) = "" || seen.Has(sc)) {
+            skipped++
+            continue
+        }
+        if (loadedLaunchers.Has(sc) || loadedExpansions.Has(sc)) {
+            skipped++    ; never overwrite existing shortcuts on import
+            continue
+        }
+        if (type = "Launcher") {
+            if (IsAllowedTarget(val)
+                && LockedFileAppend(launcherPath, sc . " " . EncodeNewlines(val) . "`n")) {
+                seen[sc] := true
                 imported++
             } else {
                 skipped++
             }
+        } else if (type = "Expansion") {
+            if (LockedFileAppend(textExpansionPath, sc . " " . EncodeNewlines(val) . "`n")) {
+                seen[sc] := true
+                imported++
+            } else {
+                skipped++
+            }
+        } else {
+            skipped++
         }
-        LoadLaunchers()
-        LoadTextExpansions()
-        MsgBox("Import complete.`n`nImported: " . imported .
-               "`nSkipped: " . skipped, "Import Results", "Iconi")
-    } catch Error as err {
-        MsgBox("Import failed: " . err.Message, "Error", "Icon!")
     }
+    LoadLaunchers()
+    LoadTextExpansions()
+    MsgBox("Import complete.`n`nImported: " . imported .
+           "`nSkipped: " . skipped .
+           (skipped > 0 ? "`n`n(Existing shortcuts are never overwritten by an import.)" : ""),
+           "Import Results", "Iconi")
 }
 
 ;------------------------------------------------
@@ -1573,7 +1620,7 @@ ToggleSounds() {
     currentStatus := config["Feedback"]["PlaySounds"]
     newStatus := !currentStatus
     config["Feedback"]["PlaySounds"] := newStatus
-    
+
     ; Properly save only the PlaySounds key to the [Settings] section
     try {
         IniWrite(newStatus ? "true" : "false", prefsPath, "Settings", "PlaySounds")
@@ -1615,6 +1662,49 @@ SaveTriggerPrefs() {
 }
 
 ;------------------------------------------------
+; MODE: Starter / Full
+;------------------------------------------------
+LoadModePref() {
+    global prefsPath, appMode
+    if (!FileExist(prefsPath))
+        return
+    try {
+        saved := IniRead(prefsPath, "Mode", "Level", "starter")
+        if (saved = "full")
+            appMode := "full"
+    }
+}
+
+SaveModePref(level) {
+    global prefsPath
+    try IniWrite(level, prefsPath, "Mode", "Level")
+}
+
+UnlockFullMode() {
+    global appMode
+    if (appMode = "full") {
+        TrayTip("Already Unlocked",
+                "Full features are already active.", "Iconi")
+        return
+    }
+    msg := "Unlock MultiShortcuts Full?`n`n"
+    msg .= "Full mode adds:`n"
+    msg .= "  * Custom text expansions and app launchers`n"
+    msg .= "  * Edit Shortcuts GUI`n"
+    msg .= "  * Capture selected text as expansion`n"
+    msg .= "  * Quick Expansion Picker - Undo - Backups`n"
+    msg .= "  * CSV import/export - Usage stats`n`n"
+    msg .= "All free. The built-in shortcuts you already use will keep working.`n`n"
+    msg .= "This is a one-way unlock - Starter mode won't be available after.`n`n"
+    msg .= "Continue?"
+    if (MsgBox(msg, "Unlock Full Features", "YesNo Icon?") != "Yes")
+        return
+    SaveModePref("full")
+    TrayTip("Unlocking Full Mode",
+            "Reloading MultiShortcuts...", "Iconi")
+    SetTimer(ReloadScriptSilent, -600)
+}
+
 ; Validate a candidate trigger character.
 ; Must be a single character, not whitespace, not used by other families,
 ; and not a character that breaks hotstring registration.
@@ -1627,7 +1717,7 @@ IsValidTriggerChar(ch, otherTrigger) {
     ; '=' is reserved by the date/utility family.
     ; '|' is the file separator in the data files.
     ; '"' would break the quoted string in the file.
-    reserved := ["=", "|", '"', "/", '\']
+    reserved := ["=", "|", '"', "/", "\"]
     for , r in reserved {
         if (ch = r)
             return "The character '" . ch . "' is reserved and cannot be used as a trigger."
@@ -1640,89 +1730,81 @@ IsValidTriggerChar(ch, otherTrigger) {
     return ""  ; empty string = valid
 }
 
-; Module-level state used by ShowTriggerSetup / DoSaveTriggers
-global _triggerSetupGui      := ""
-global _triggerSetupEditCmd  := ""
-global _triggerSetupEditApp  := ""
-global _triggerSetupOldCmd   := ""
-global _triggerSetupOldApp   := ""
-
 ShowTriggerSetup() {
-    global config, _triggerSetupGui, _triggerSetupEditCmd, _triggerSetupEditApp
-    global _triggerSetupOldCmd, _triggerSetupOldApp
-    _triggerSetupOldCmd := config["Triggers"]["WinCmd"]
-    _triggerSetupOldApp := config["Triggers"]["AppLaunch"]
+    global config
+    curWinCmd    := config["Triggers"]["WinCmd"]
+    curAppLaunch := config["Triggers"]["AppLaunch"]
 
     g := Gui("+ToolWindow", "Trigger Keys Setup")
     g.SetFont("s10", "Segoe UI")
     g.BackColor := "FFFFFF"
 
-    g.Add("Text", "x15 y15 w470 h40", "Customize the prefix characters for the built-in shortcut families. Existing shortcuts using the old prefixes will be migrated.")
+    g.Add("Text", "x15 y15 w470",
+        "Customize the prefix character for the two built-in shortcut families.`n" .
+        "Changes apply on save. Existing shortcuts using the old prefix will be migrated.")
 
-    g.Add("Text", "x15 y75 w200", "Commands prefix (default semicolon):")
-    edCmd := g.Add("Edit", "x270 y72 w40 Limit1 Center", _triggerSetupOldCmd)
+    g.Add("Text", "x15 y65 w200", "Windows Commands family (default semicolon)")
+    edWinCmd := g.Add("Edit", "x230 y62 w40 Limit1 Center", curWinCmd)
 
-    g.Add("Text", "x15 y110 w200", "Launchers prefix (default backtick):")
-    edApp := g.Add("Edit", "x270 y107 w40 Limit1 Center", _triggerSetupOldApp)
+    g.Add("Text", "x290 y65 w200 cGray", "e.g. semicolon-c = Copy, semicolon-v = Paste")
 
-    g.Add("Text", "x15 y150 w470 h40 cGray", "Tip: avoid letters and digits - they would fire in the middle of words. The two prefixes must be different.")
-    g.Add("Button", "x230 y210 w90 Default", "Save").OnEvent("Click", DoSaveTriggers)
-    g.Add("Button", "x330 y210 w90", "Cancel").OnEvent("Click", CancelTriggerSetup)
-    g.OnEvent("Escape", CancelTriggerSetup)
+    g.Add("Text", "x15 y100 w200", "App Launch family (default backtick)")
+    edAppLaunch := g.Add("Edit", "x230 y97 w40 Limit1 Center", curAppLaunch)
 
-    _triggerSetupGui     := g
-    _triggerSetupEditCmd := edCmd
-    _triggerSetupEditApp := edApp
-    g.Show("w500 h255")
-}
+    g.Add("Text", "x290 y100 w200 cGray", "e.g. backtick-S = Snip, backtick-C = Calc")
 
-CancelTriggerSetup(*) {
-    global _triggerSetupGui
-    if (_triggerSetupGui != "")
-        _triggerSetupGui.Destroy()
-    _triggerSetupGui := ""
-}
+    g.Add("Text", "x15 y140 w470 cGray",
+        "Tip: avoid letters and digits - they fire in the middle of words.`n" .
+        "Good choices: comma, period, tilde, or slash  (each character must be unique)")
 
-DoSaveTriggers(*) {
-    global config, _triggerSetupGui, _triggerSetupEditCmd, _triggerSetupEditApp
-    global _triggerSetupOldCmd, _triggerSetupOldApp
-    newCmd := _triggerSetupEditCmd.Value
-    newApp := _triggerSetupEditApp.Value
-    oldCmd := _triggerSetupOldCmd
-    oldApp := _triggerSetupOldApp
+    g.Add("Button", "x230 y195 w90 Default", "Save").OnEvent("Click", SaveTriggers)
+    g.Add("Button", "x330 y195 w90", "Cancel").OnEvent("Click", (*) => g.Destroy())
 
-    err := IsValidTriggerChar(newCmd, newApp)
-    if (err != "") {
-        MsgBox("Commands prefix:" . "`n`n" . err, "Invalid Trigger", "Icon!")
-        return
+    g.OnEvent("Escape", (*) => g.Destroy())
+    g.Show("w500 h240")
+
+    SaveTriggers(*) {
+        newWin := edWinCmd.Value
+        newApp := edAppLaunch.Value
+
+        ; Validate each character (each must be valid against the *other* new value)
+        err := IsValidTriggerChar(newWin, newApp)
+        if (err != "") {
+            MsgBox("Windows Commands trigger:`n`n" . err, "Invalid Trigger", "Icon!")
+            return
+        }
+        err := IsValidTriggerChar(newApp, newWin)
+        if (err != "") {
+            MsgBox("App Launch trigger:`n`n" . err, "Invalid Trigger", "Icon!")
+            return
+        }
+
+        ; No-op if nothing changed
+        if (newWin = curWinCmd && newApp = curAppLaunch) {
+            g.Destroy()
+            return
+        }
+
+        ; Migrate existing shortcuts that use the old prefixes
+        migrated := MigrateTriggerPrefix(curWinCmd, newWin)
+                  + MigrateTriggerPrefix(curAppLaunch, newApp)
+
+        config["Triggers"]["WinCmd"]    := newWin
+        config["Triggers"]["AppLaunch"] := newApp
+        SaveTriggerPrefs()
+
+        ; Re-seed defaults under the new prefixes (won't overwrite anything that exists)
+        SeedDefaultExpansions()
+
+        g.Destroy()
+        msg := "Triggers updated:`n   Windows Commands: " . newWin
+        msg .= "`n   App Launch: " . newApp
+        if (migrated > 0)
+            msg .= "`n`n" . migrated . " existing shortcut(s) migrated to the new prefix."
+        msg .= "`n`nReloading..."
+        TrayTip("Trigger Keys Updated", msg, "Iconi")
+        SetTimer(ReloadScriptSilent, -800)
     }
-    err := IsValidTriggerChar(newApp, newCmd)
-    if (err != "") {
-        MsgBox("Launchers prefix:" . "`n`n" . err, "Invalid Trigger", "Icon!")
-        return
-    }
-    if (newCmd = oldCmd && newApp = oldApp) {
-        CancelTriggerSetup()
-        return
-    }
-
-    migrated := MigrateTriggerPrefix(oldCmd, newCmd)
-              + MigrateTriggerPrefix(oldApp, newApp)
-
-    config["Triggers"]["WinCmd"]    := newCmd
-    config["Triggers"]["AppLaunch"] := newApp
-    SaveTriggerPrefs()
-    SeedDefaultExpansions()
-
-    CancelTriggerSetup()
-    msg := "Prefixes updated:"
-    msg .= "`n  Commands: " . newCmd
-    msg .= "`n  Launchers: " . newApp
-    if (migrated > 0)
-        msg .= "`n`n" . migrated . " shortcut(s) migrated."
-    msg .= "`n`nReloading..."
-    TrayTip("Trigger Keys Updated", msg, "Iconi")
-    SetTimer(ReloadScriptSilent, -800)
 }
 
 ; Rewrites the appropriate data file to replace oldPrefix with newPrefix on
@@ -1777,7 +1859,7 @@ MigratePrefixIn(dataMap, filePath, oldPrefix, newPrefix, headerComment) {
 ; EDIT GUI
 ;------------------------------------------------
 ShowEditGUI(startTab := "launchers") {
-    gEdit := Gui("-Resize", "MultiShortcuts Pro - Manage Shortcuts")
+    gEdit := Gui("+Resize +MinSize640x460", "MultiShortcuts v2.0.0 - Manage Shortcuts")
     gEdit.SetFont("s10", "Segoe UI")
     gEdit.BackColor := "F5F5F5"
     tabs := gEdit.Add("Tab3", "x8 y8 w784 h460 +BackgroundF5F5F5",
@@ -1792,9 +1874,9 @@ ShowEditGUI(startTab := "launchers") {
     countL := gEdit.Add("Text", "x380 y48 w390 h20 +Right cGray vCountL", "")
     lvL := gEdit.Add("ListView", "x18 y76 w764 h320 Grid +LV0x10000 vLvL",
                      ["Shortcut", "Target", "Type"])
-    lvL.ModifyCol(1, 130)
-    lvL.ModifyCol(2, 530)
-    lvL.ModifyCol(3, 85)
+    lvL.ModifyCol(1, "AutoHdr")
+    lvL.ModifyCol(2, "Auto")
+    lvL.ModifyCol(3, "AutoHdr")
     gEdit.Add("Button", "x18  y406 w110 h26", "&Edit")
         .OnEvent("Click", (*) => EditSelectedRow(lvL, "launchers", gEdit, searchL, countL))
     gEdit.Add("Button", "x134 y406 w110 h26", "&Delete")
@@ -1819,8 +1901,8 @@ ShowEditGUI(startTab := "launchers") {
     countE := gEdit.Add("Text", "x380 y48 w390 h20 +Right cGray vCountE", "")
     lvE := gEdit.Add("ListView", "x18 y76 w764 h320 Grid +LV0x10000 vLvE",
                      ["Shortcut", "Expands To"])
-    lvE.ModifyCol(1, 130)
-    lvE.ModifyCol(2, 615)
+    lvE.ModifyCol(1, "AutoHdr")
+    lvE.ModifyCol(2, "Auto")
     gEdit.Add("Button", "x18  y406 w110 h26", "&Edit")
         .OnEvent("Click", (*) => EditSelectedRow(lvE, "expansions", gEdit, searchE, countE))
     gEdit.Add("Button", "x134 y406 w110 h26", "&Delete")
@@ -1875,13 +1957,26 @@ PopulateLauncherList(lv, filter) {
     for shortcut, target in loadedLaunchers {
         if (filter != "" && !InStr(shortcut, filter) && !InStr(target, filter))
             continue
-        type := InStr(target, "://") || InStr(target, "mailto:") ? "Web/Email"
-              : RegExMatch(StrLower(target), '\.(exe|lnk)("|\s|$)') ? "App"
-              : "Document"
-        lv.Add("", shortcut, target, type)
+        lv.Add("", shortcut, target, LauncherType(target))
         count++
     }
     return count
+}
+
+; Label for the Type column. String checks only, so an offline drive
+; can't slow the list down. Looks at the program path itself, so quoted
+; paths and launchers with arguments are labelled correctly.
+LauncherType(target) {
+    t := StrLower(Trim(target))
+    if (InStr(t, "://") || InStr(t, "mailto:"))
+        return "Web/Email"
+    if (RegExMatch(t, '^"([^"]+)"', &m))
+        t := m[1]
+    if (RegExMatch(t, "\.(exe|lnk)(\s|$)"))
+        return "App"
+    if (RegExMatch(t, "^[a-z][a-z0-9+.\-]+:"))
+        return "App"          ; protocol handler such as ms-screenclip:
+    return "Document"
 }
 
 PopulateExpansionList(lv, filter) {
@@ -1924,7 +2019,12 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
         return
     }
     oldShortcut := lv.GetText(row, 1)
-    oldTarget   := lv.GetText(row, 2)
+    ; The list shows multi-line expansions with " <- " in place of line
+    ; breaks - edit the stored value, not the display copy.
+    if (dataType = "launchers")
+        oldTarget := loadedLaunchers.Has(oldShortcut) ? loadedLaunchers[oldShortcut] : lv.GetText(row, 2)
+    else
+        oldTarget := loadedExpansions.Has(oldShortcut) ? loadedExpansions[oldShortcut] : lv.GetText(row, 2)
 
     gInline := Gui("+Owner" . parentGui.Hwnd . " +ToolWindow", "Edit: " . oldShortcut)
     gInline.SetFont("s10", "Segoe UI")
@@ -1941,8 +2041,9 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
 
     SaveInlineEdit(*) {
         newShortcut := Trim(editSC.Value)
-        newTarget   := Trim(editVal.Value)
-        if (newShortcut = "" || newTarget = "") {
+        ; Keep intentional leading/trailing spaces in expansions
+        newTarget   := (dataType = "launchers") ? Trim(editVal.Value) : editVal.Value
+        if (newShortcut = "" || Trim(newTarget) = "") {
             MsgBox("Both fields are required.", "Validation", "Icon!")
             return
         }
@@ -2021,15 +2122,162 @@ TestSelectedRow(lv, dataType) {
 ; HELP WINDOW
 ;------------------------------------------------
 ShowHelp() {
-    global config
+    global appMode
+    if (appMode = "starter") {
+        ShowStarterHelp()
+        return
+    }
+    ShowFullHelp()
+}
+
+; Help screens describe the user's actual shortcuts, not the factory
+; defaults - people change these (and existing entries are never
+; overwritten by the built-in seeds).
+
+; Rows for the ` family: every launcher that is the trigger plus one character
+AppLaunchHelpRows() {
+    global loadedLaunchers, config
+    al   := config["Triggers"]["AppLaunch"]
+    rows := []
+    for sc, target in loadedLaunchers {      ; Map order: digits, A-Z, a-z
+        if (StrLen(sc) = StrLen(al) + 1 && SubStr(sc, 1, StrLen(al)) = al)
+            rows.Push([sc, LauncherLabel(target)])
+    }
+    if (rows.Length = 0)
+        rows.Push([al . "?", "No quick launchers set up"])
+    return rows
+}
+
+; Short, readable name for a launcher target
+LauncherLabel(target) {
+    static known := Map("calc.exe", "Calculator", "ms-screenclip:", "Snip Tool")
+    t := Trim(target)
+    if (known.Has(StrLower(t)))
+        return known[StrLower(t)]
+    if (RegExMatch(t, "i)^https?://(?:www\.)?([^/?#]+)", &m))
+        return m[1]                               ; e.g. claude.ai
+    if (RegExMatch(t, "i)^mailto:(.+)$", &m))
+        return "Email " . m[1]
+    SplitTarget(t, &path, &args)
+    SplitPath(path, &name, , , &nameNoExt)
+    return (nameNoExt != "") ? nameNoExt : t
+}
+
+; What an expansion produces today. Only date/time placeholders are filled
+; in - anything else ({clip}, {prompt}, {key}...) is shown as written, so
+; opening Help never reads the clipboard or pops up a question.
+ExpansionPreview(sc) {
+    global loadedExpansions
+    if (!loadedExpansions.Has(sc))
+        return "(not set)"
+    val := loadedExpansions[sc]
+    if (RegExMatch(val, "\{(?!(?:date|time|day|month|year)\b)[^}]*\}"))
+        return val
+    return ResolvePlaceholders(val)
+}
+
+ShowStarterHelp() {
+    global config, holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
+    wc := config["Triggers"]["WinCmd"]
+    al := config["Triggers"]["AppLaunch"]
+
+    gHelp := Gui("+ToolWindow", "MultiShortcuts (Starter) - Built-in Shortcuts")
+    gHelp.SetFont("s10", "Segoe UI")
+    gHelp.BackColor := "FFFFFF"
+    title := gHelp.Add("Text", "x0 y0 w560 h40 +0x200 Background1A1A2E cWhite Center",
+                        "  MultiShortcuts v2.0.0 - Starter Mode  ")
+    title.SetFont("s12 Bold", "Segoe UI")
+
+    sections := [
+        [holdKeysOn ? "HOLD KEYS  (on)" : "HOLD KEYS  (off - turn on in the tray menu)", [
+            ["hold `;",  "Ctrl + next key   (hold `; + C = copy)"],
+            ["hold ``",  "Alt + next key"],
+            ["Caps Lock", capsKeyOn  ? "tap = ``,  hold = Alt" : "normal   (option in tray menu)"],
+            ["Middle btn", !mouseKeyOn ? "normal   (change in tray menu)"
+                         : mouseKeyMode = "alt" ? "click = ``  hold = Alt  Shift = normal" : "click = `;  hold = Ctrl  Shift = normal"]
+        ]],
+        ["; WINDOWS COMMANDS", [
+            [wc . "c",  "Copy"],
+            [wc . "x",  "Cut"],
+            [wc . "v",  "Paste"],
+            [wc . "z",  "Undo  /  " . wc . "y  Redo"],
+            [wc . "a",  "Select All  /  " . wc . "A  Select All and Copy"],
+            [wc . "f",  "Find  /  " . wc . "h  Find & Replace"],
+            [wc . "s",  "Save  /  " . wc . "S  Save As"],
+            [wc . "o",  "Open  /  " . wc . "n  New"],
+            [wc . "p",  "Print  /  " . wc . "w  Close tab"],
+            [wc . "r",  "Refresh (F5)"],
+            [wc . "8",  "Emoji picker (Win+.)"],
+            [wc . "k",  "Task Manager  /  " . wc . "L  Lock PC  /  " . wc . "m  Minimize"],
+            [wc . "g",  "Go to line"]
+        ]],
+        ["; DOCUMENT NAVIGATION", [
+            [wc . "t",  "Top of page"],
+            [wc . "b",  "Bottom of page"],
+            [wc . "u",  "Page Up  /  " . wc . "d  Page Down"],
+            [wc . "l",  "Line start  /  " . wc . "e  Line end"],
+            [wc . "<",  "Snap window left  /  " . wc . ">  Snap window right"]
+        ]],
+        ["`` APP LAUNCH (case-sensitive)", AppLaunchHelpRows()],
+        ["= DATES & UTILITY", [
+            ["-=",   "Today:  " . ExpansionPreview("-=")],
+            ["=-",   "Today (short):  " . ExpansionPreview("=-")],
+            ["1-=",  "1 week  /  2-=  2 weeks  /  1m=  1 month  /  1y=  1 year"],
+            ["r=",   "F5 Refresh  /  f=  F11 Fullscreen  /  d=  F12 Dev tools"],
+            ["s=",   "Ctrl+S Save  /  t=  Ctrl+T New tab"]
+        ]]
+    ]
+
+    y := 50
+    for si, section in sections {
+        heading := gHelp.Add("Text", "x10 y" . y . " w540 h22 c1A1A2E", section[1])
+        heading.SetFont("s10 Bold", "Segoe UI")
+        y += 24
+        gHelp.Add("Text", "x10 y" . y . " w540 h1 Background808080")
+        y += 6
+        for , row in section[2] {
+            keyCtrl := gHelp.Add("Text",
+                "x14 y" . y . " w80 h20 BackgroundE8EAF6 c1A1A2E Center", row[1])
+            keyCtrl.SetFont("s9 Bold", "Consolas")
+            gHelp.Add("Text", "x102 y" . (y+1) . " w440 h20 c444444", row[2])
+            y += 24
+        }
+        y += 10
+    }
+
+    y += 4
+    unlockBg := gHelp.Add("Text", "x10 y" . y . " w540 h60 BackgroundFFFDE7")
+    unlockText := gHelp.Add("Text", "x18 y" . (y+8) . " w524 h50 BackgroundFFFDE7 c555500",
+        "Ready for more? * Unlock Full Features from the tray menu - `n" .
+        "add your own shortcuts, customize anything, full editor GUI.")
+    y += 68
+    gHelp.Add("Text", "x10 y" . y . " w540 h18 cAAAAAA Center",
+        "(c) GnuKey LLC  -  Built-in shortcuts always work in Starter and Full modes")
+    y += 22
+    gHelp.Add("Button", "x230 y" . y . " w100 h30", "Close")
+        .OnEvent("Click", (*) => gHelp.Destroy())
+    gHelp.OnEvent("Close",  (*) => gHelp.Destroy())
+    gHelp.OnEvent("Escape", (*) => gHelp.Destroy())
+    gHelp.Show("w560 h" . (y + 44))
+}
+
+ShowFullHelp() {
+    global config, holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
     hk := config["Hotkeys"]
-    gHelp := Gui("+ToolWindow", "Help - MultiShortcuts Pro")
+    gHelp := Gui("+ToolWindow", "Help - MultiShortcuts v2.0.0")
     gHelp.SetFont("s10", "Segoe UI")
     gHelp.BackColor := "FFFFFF"
     title := gHelp.Add("Text", "x0 y0 w500 h40 +0x200 Background1A1A2E cWhite Center",
-                        "  MultiShortcuts Pro  ")
+                        "  MultiShortcuts v2.0.0  ")
     title.SetFont("s12 Bold", "Segoe UI")
     sections := [
+        [holdKeysOn ? "HOLD KEYS  (on)" : "HOLD KEYS  (off - turn on in the tray menu)", [
+            ["hold `;",  "Ctrl + next key   (hold `; + C = copy)"],
+            ["hold ``",  "Alt + next key"],
+            ["Caps Lock", capsKeyOn  ? "tap = ``,  hold = Alt" : "normal   (option in tray menu)"],
+            ["Middle btn", !mouseKeyOn ? "normal   (change in tray menu)"
+                         : mouseKeyMode = "alt" ? "click = ``  hold = Alt  Shift = normal" : "click = `;  hold = Ctrl  Shift = normal"]
+        ]],
         ["ADD NEW SHORTCUTS", [
             [hk["AddExpansion"],        "Add Text Expansion"],
             [hk["AddLauncher"],         "Add App Launcher"],
@@ -2048,8 +2296,40 @@ ShowHelp() {
             [hk["UndoExpansion"],       "Undo Last Expansion"],
             [hk["ImmediateBackup"],     "Backup Both Files Now"],
             [hk["PauseResume"],         "Pause / Resume All Macros"],
+            [hk["SnipTool"],            "Snip Tool (Win+Shift+S)"],
             [hk["ShowHelp"],            "This Help Screen"]
-        ]]
+        ]],
+        ["= SHORTCUT FAMILY", [
+            ["-=",   "Today:  " . ExpansionPreview("-=")],
+            ["=-",   "Today (short):  " . ExpansionPreview("=-")],
+            ["1-=",  "One week from today"],
+            ["2-=",  "Two weeks from today"],
+            ["1m=",  "One month from today"],
+            ["1y=",  "One year from today"],
+            ["r=",   "F5 - Refresh"],
+            ["f=",   "F11 - Fullscreen"],
+            ["s=",   "Ctrl+S - Save"],
+            ["t=",   "Ctrl+T - New tab"]
+        ]],
+        ["; WINDOWS COMMANDS", [
+            [config["Triggers"]["WinCmd"] . "c",  "Copy  /  " . config["Triggers"]["WinCmd"] . "x  Cut  /  " . config["Triggers"]["WinCmd"] . "v  Paste"],
+            [config["Triggers"]["WinCmd"] . "z",  "Undo  /  " . config["Triggers"]["WinCmd"] . "y  Redo"],
+            [config["Triggers"]["WinCmd"] . "a",  "Select All  /  " . config["Triggers"]["WinCmd"] . "A  Select All + Copy"],
+            [config["Triggers"]["WinCmd"] . "f",  "Find  /  " . config["Triggers"]["WinCmd"] . "h  Find & Replace"],
+            [config["Triggers"]["WinCmd"] . "s",  "Save  /  " . config["Triggers"]["WinCmd"] . "S  Save As  /  " . config["Triggers"]["WinCmd"] . "o  Open  /  " . config["Triggers"]["WinCmd"] . "n  New"],
+            [config["Triggers"]["WinCmd"] . "p",  "Print  /  " . config["Triggers"]["WinCmd"] . "w  Close tab"],
+            [config["Triggers"]["WinCmd"] . "r",  "Refresh (F5)"],
+            [config["Triggers"]["WinCmd"] . "8",  "Emoji picker  /  " . config["Triggers"]["WinCmd"] . "g  Go to line"],
+            [config["Triggers"]["WinCmd"] . "k",  "Task Manager  /  " . config["Triggers"]["WinCmd"] . "L  Lock PC  /  " . config["Triggers"]["WinCmd"] . "m  Minimize"]
+        ]],
+        ["; DOCUMENT NAVIGATION", [
+            [config["Triggers"]["WinCmd"] . "t",  "Top of page"],
+            [config["Triggers"]["WinCmd"] . "b",  "Bottom of page"],
+            [config["Triggers"]["WinCmd"] . "u",  "Page Up  /  " . config["Triggers"]["WinCmd"] . "d  Page Down"],
+            [config["Triggers"]["WinCmd"] . "l",  "Line start  /  " . config["Triggers"]["WinCmd"] . "e  Line end"],
+            [config["Triggers"]["WinCmd"] . "<",  "Snap left  /  " . config["Triggers"]["WinCmd"] . ">  Snap right"]
+        ]],
+        ["`` QUICK APP LAUNCH (case-sensitive)", AppLaunchHelpRows()]
     ]
     y := 50
     for si, section in sections {
@@ -2058,12 +2338,17 @@ ShowHelp() {
         y += 24
         gHelp.Add("Text", "x10 y" . y . " w480 h1 Background808080")
         y += 6
+        ; Wider, plain labels for hold keys (section 1) and the =, ;, and ` family
+        ; sections (section 5 onward); Alt-key hotkeys in between are formatted
+        labelW := (si = 1 || si >= 5) ? 170 : 110
+        descX  := (si = 1 || si >= 5) ? 192 : 132
+        descW  := (si = 1 || si >= 5) ? 290 : 350
         for , row in section[2] {
-            label   := HotkeyLabel(row[1])
+            label   := (si = 1 || si >= 5) ? row[1] : HotkeyLabel(row[1])
             keyCtrl := gHelp.Add("Text",
-                "x14 y" . y . " w110 h20 BackgroundE8EAF6 c1A1A2E Center", label)
+                "x14 y" . y . " w" . labelW . " h20 BackgroundE8EAF6 c1A1A2E Center", label)
             keyCtrl.SetFont("s9 Bold", "Consolas")
-            gHelp.Add("Text", "x132 y" . (y+1) . " w350 h20 c444444", row[2])
+            gHelp.Add("Text", "x" . descX . " y" . (y+1) . " w" . descW . " h20 c444444", row[2])
             y += 26
         }
         y += 10
@@ -2077,126 +2362,26 @@ ShowHelp() {
         y += 20
     }
     y += 8
-    gHelp.Add("Text", "x10 y" . y . " w480 h54 BackgroundFFFDE7")
-    tipText := "TIP: Type your shortcut anywhere - it triggers automatically." . "`n"
-    tipText .= "     Alt+C captures selected text instantly." . "`n"
-    tipText .= "     Click the 'Pre-loaded Shortcuts' button below to see all" . "`n"
-    tipText .= "     built-in shortcut families that ship with MultiShortcuts Pro."
-    gHelp.Add("Text", "x18 y" . (y+5) . " w468 h66 BackgroundFFFDE7 c555500", tipText)
-    y += 76
+    tipBg := gHelp.Add("Text", "x10 y" . y . " w480 h74 BackgroundFFFDE7")
+    gHelp.Add("Text", "x18 y" . (y+5) . " w468 h86 BackgroundFFFDE7 c555500",
+              "TIP: Type your shortcut anywhere - it triggers automatically.`n" .
+              "     Alt+C captures selected text instantly.`n" .
+              "     Use {date:dd/MM/yyyy} or {time:h:mm tt} for custom formats.`n" .
+              "     = family: r= refresh  f= fullscreen  s= save  t= new tab`n" .
+              "               1-= 1 week from today  2-= 2 weeks  1m= 1 month`n" .
+              "     Sequences: {key:{Tab}} = Tab, {key:^s} = Ctrl+S`n" .
+              "               {wait:500} = pause, {focus:Notepad} = switch window")
+    y += 96
     gHelp.Add("Text", "x10 y" . y . " w480 h1 Background808080")
     y += 6
     gHelp.Add("Text", "x10 y" . y . " w480 h18 cAAAAAA Center",
               "(c) GnuKey LLC  -  Implementation: Claude (Anthropic)  -  Review: Gemini (Google)")
     y += 22
-    gHelp.Add("Button", "x100 y" . y . " w200 h30", "Pre-loaded Shortcuts")
-        .OnEvent("Click", (*) => ShowPreloadedShortcuts())
-    gHelp.Add("Button", "x320 y" . y . " w80 h30 Default", "Close")
+    gHelp.Add("Button", "x190 y" . y . " w120 h30", "Close")
         .OnEvent("Click", (*) => gHelp.Destroy())
     gHelp.OnEvent("Close",  (*) => gHelp.Destroy())
     gHelp.OnEvent("Escape", (*) => gHelp.Destroy())
     gHelp.Show("w500 h" . (y + 44))
-}
-
-;------------------------------------------------
-; PRE-LOADED SHORTCUTS POPUP
-;------------------------------------------------
-; Shows all the built-in shortcut families that ship with MultiShortcuts Pro.
-; Organized by family for easy scanning. Users may have customized these, but
-; this popup shows the defaults — useful for new users and for remembering
-; what's available after time away.
-ShowPreloadedShortcuts() {
-    global config
-    wc := config["Triggers"]["WinCmd"]
-    al := config["Triggers"]["AppLaunch"]
-
-    gPre := Gui("+ToolWindow", "Pre-loaded Shortcuts - MultiShortcuts Pro")
-    gPre.SetFont("s10", "Segoe UI")
-    gPre.BackColor := "FFFFFF"
-
-    title := gPre.Add("Text", "x0 y0 w560 h40 +0x200 Background1A1A2E cWhite Center",
-                       "  Pre-loaded Shortcuts  ")
-    title.SetFont("s12 Bold", "Segoe UI")
-
-    sections := [
-        ["WINDOWS APPS (" . wc . " family)", [
-            [wc . "c",  "Calculator"],
-            [wc . "q",  "Snipping Tool"],
-            [wc . "f",  "File Explorer"],
-            [wc . "T",  "Task Manager"]
-        ]],
-        ["WINDOWS COMMANDS (" . wc . " family)", [
-            [wc . "s",  "Save (Ctrl+S)"],
-            [wc . "S",  "Save As (Ctrl+Shift+S)"],
-            [wc . "n",  "New (Ctrl+N)"],
-            [wc . "o",  "Open (Ctrl+O)"],
-            [wc . "p",  "Print (Ctrl+P)"],
-            [wc . "w",  "Close tab (Ctrl+W)"],
-            [wc . "r",  "Refresh (F5)"],
-            [wc . "a",  "Switch app (Alt+Tab)"],
-            [wc . "A",  "Select All and Copy"],
-            [wc . "L",  "Lock PC"],
-            [wc . "E",  "Emoji picker"]
-        ]],
-        ["DOCUMENT NAVIGATION (" . wc . " family)", [
-            [wc . "t",  "Top of page (Ctrl+Home)"],
-            [wc . "b",  "Bottom of page (Ctrl+End)"],
-            [wc . "u",  "Page Up"],
-            [wc . "d",  "Page Down"],
-            [wc . "l",  "Line start (Home)"],
-            [wc . "e",  "Line end (End)"],
-            [wc . "<",  "Snap window left"],
-            [wc . ">",  "Snap window right"],
-            [wc . "m",  "Minimize window"]
-        ]],
-        ["LAUNCHERS (" . al . " family)", [
-            [al . "a",  "ChatGPT"],
-            [al . "c",  "Claude"],
-            [al . "g",  "Gemini"],
-            [al . "p",  "Perplexity"],
-            [al . "1",  "Google Voice"],
-            [al . "2",  "Gmail"],
-            [al . "3",  "Google Calendar"]
-        ]],
-        ["DATES (= family)", [
-            ["-=",   "Today's date (e.g. May 25, 2026)"],
-            ["=-",   "Today's date, short form (05/25/26)"],
-            ["1-=",  "One week from today"],
-            ["2-=",  "Two weeks from today"],
-            ["1m=",  "One month from today"],
-            ["1y=",  "One year from today"]
-        ]]
-    ]
-
-    y := 50
-    for si, section in sections {
-        heading := gPre.Add("Text", "x10 y" . y . " w540 h22 c1A1A2E", section[1])
-        heading.SetFont("s10 Bold", "Segoe UI")
-        y += 24
-        gPre.Add("Text", "x10 y" . y . " w540 h1 Background808080")
-        y += 6
-        for , row in section[2] {
-            trgCtrl := gPre.Add("Text",
-                "x14 y" . y . " w110 h20 BackgroundE8EAF6 c1A1A2E Center", row[1])
-            trgCtrl.SetFont("s9 Bold", "Consolas")
-            gPre.Add("Text", "x132 y" . (y+1) . " w410 h20 c444444", row[2])
-            y += 24
-        }
-        y += 12
-    }
-
-    gPre.Add("Text", "x10 y" . y . " w540 h54 BackgroundFFFDE7")
-    noteText := "These ship with MultiShortcuts Pro. Every one is yours to" . "`n"
-    noteText .= "edit or delete — press Alt+E to open the editor. Build your own" . "`n"
-    noteText .= "shortcuts with Alt+T, Alt+A, Alt+D, Alt+W, or Alt+C."
-    gPre.Add("Text", "x18 y" . (y+5) . " w524 h48 BackgroundFFFDE7 c555500", noteText)
-    y += 64
-
-    gPre.Add("Button", "x230 y" . y . " w100 h30 Default", "Close")
-        .OnEvent("Click", (*) => gPre.Destroy())
-    gPre.OnEvent("Close",  (*) => gPre.Destroy())
-    gPre.OnEvent("Escape", (*) => gPre.Destroy())
-    gPre.Show("w560 h" . (y + 44))
 }
 
 ;------------------------------------------------
@@ -2215,35 +2400,35 @@ LoadLaunchers() {
     }
     registeredLaunchers := []
     loadedLaunchers.Clear()
-    
+
     if (!FileExist(launcherPath)) {
         TrayTip("Launchers", "No launcher file found - creating empty one.", "Iconi")
         return
     }
-    
+
     try {
         content := FileRead(launcherPath, "UTF-8")
         count := 0
-        
+
         for line in StrSplit(content, "`n", "`r") {
             line := Trim(line)
             if (line = "" || SubStr(line, 1, 2) = ";;" || SubStr(line, 1, 2) = "; ")
                 continue
-                
+
             if (InStr(line, " ")) {
                 parts := StrSplit(line, " ", , 2)
                 if (parts.Length >= 2) {
                     shortcut := Trim(parts[1])
                     target   := StrReplace(Trim(parts[2]), "[NEWLINE]", "`n")
-                    
+
                     if (shortcut != "" && target != "" && IsValidShortcut(shortcut, false)) {
                         ; Store in map
                         loadedLaunchers[shortcut] := target
                         count++
-                        
+
                         ; Use FACTORY to create a closure that captures THESE values only
                         callback := MakeLaunchCallback(target, shortcut)
-                        
+
                         try {
                             Hotstring(GetHotstringOptions(shortcut) . shortcut, callback)
                             registeredLaunchers.Push(shortcut)  ; Fix 4: track for clean reload
@@ -2254,54 +2439,48 @@ LoadLaunchers() {
                 }
             }
         }
-        
-        TrayTip("Launchers Loaded", count . " launchers ready (backtick + number works!)", "Iconi")
-        
+
     } catch Error as err {
-        MsgBox("Error loading launchers: " . err.Message . "`n`nCheck that launchers.ahk follows the 'shortcut target' format.", "Load Error", "Icon!")
+        MsgBox("Error loading launchers: " . err.Message . "`nFile preview: " . SubStr(content, 1, 200), "Load Error", "Icon!")
     }
     UpdateTrayTooltip()
 }
 
 ;------------------------------------------------
-; LAUNCH TARGET - SILENT VERSION
+; LAUNCH TARGET
 ;------------------------------------------------
 LaunchTarget(target, shortcut := "") {
     target := Trim(target)
+    ; Re-check every time a launcher fires (see IsAllowedTarget)
+    if (!IsAllowedTarget(target, "launch"))
+        return
     if (shortcut != "")
         TrackUsage(shortcut, "launcher")
 
-    cleanTarget := Trim(target, ' "')
-
     try {
-        if (InStr(cleanTarget, "://") || InStr(cleanTarget, "mailto:")) {
-            Run(cleanTarget)
-        } else if (FileExist(cleanTarget)) {
-            ; Full path exists (handles paths with spaces, e.g. Program Files)
-            Run('"' . cleanTarget . '"')
+        if (RegExMatch(target, "i)^[a-z][a-z0-9+.\-]+:")) {
+            ; Web link, email or protocol handler
+            Run(target)
         } else {
-            ; Extract base path (strip trailing arguments)
-            testPath := (SubStr(target, 1, 1) = '"')
-                      ? RegExReplace(target, '^"([^"]+)".*', "$1")
-                      : StrSplit(cleanTarget, " ")[1]
-
-            ; Warn if path looks like a file/folder that doesn't exist
-            ; (avoids 10-30 second freeze on missing network shares)
-            if (InStr(testPath, "\") && !FileExist(testPath)) {
+            SplitTarget(target, &path, &args)
+            ; Fail fast on a missing file or offline drive instead of a
+            ; long freeze or a vague Windows error
+            if (InStr(path, "\") && !FileExist(path)) {
                 PlayFeedback("ErrorSound")
                 MsgBox("Target not found - it may be offline or the path has moved.`n`n" .
-                       testPath, "Launch Error", "Icon!")
+                       path, "Launch Error", "Icon!")
                 return
             }
-            Run(cleanTarget)
+            Run('"' . path . '"' . (args != "" ? " " . args : ""))
         }
         PlayFeedback("LaunchSound")
     } catch Error as err {
         PlayFeedback("ErrorSound")
-        MsgBox("Could not launch: " . cleanTarget . "`n`nError: " . err.Message,
+        MsgBox("Could not launch: " . target . "`n`nError: " . err.Message,
                "Launch Error", "Icon!")
     }
 }
+
 ;------------------------------------------------
 ; TEXT EXPANSION LOADING
 ;------------------------------------------------
@@ -2360,46 +2539,35 @@ DoExpand(text, sc) {
     for idx, tok in seqTokens
         resolved := StrReplace(resolved, "##SEQ" . idx . "##", tok)
 
-    ; ── Step 4: record history using only the text actually typed ────────────
-    ; Strip {key:}/{wait:}/{focus:}/{cursor} tokens - they type nothing, so
-    ; counting them inflates the undo length and Alt+Z would backspace real
-    ; document text. Command-only shortcuts are not recorded at all.
-    typedText := RegExReplace(resolved, "\{(?:(?:key|wait|focus):(?:[^{}]|\{[^{}]*\})*|cursor(?::\d+)?)\}", "")
-    if (Trim(typedText) != "")
-        RecordExpansionHistory(sc, sc, typedText)
     TrackUsage(sc, "expansion")
     PlayFeedback("ExpandSound")
 
-    ; ── Step 3: split into segments on sequence tokens ───────────────────────
-    ;   Tokens recognised:
+    ; ── Step 4: type it ──────────────────────────────────────────────────────
+    ;   Sequence tokens recognised:
     ;     {key:X}         – send keystroke X (any AHK Send key notation)
     ;     {wait:N}        – sleep N milliseconds
     ;     {focus:Title}   – activate window whose title contains Title
     ;
-    ;   A 150 ms pause is inserted automatically before every {key:} so the
-    ;   target application has time to open dialogs or move focus.
+    ;   A short pause (SequenceDelay) is inserted before every {key:} and
+    ;   {focus:} so the target application has time to open dialogs or move focus.
     ;
-    ;   {cursor} / {cursor:N} still work and are processed at the very end.
+    ;   A space is typed after the text (the trigger's own ending space is
+    ;   suppressed). In a sequence, the space only follows the final text.
     ; ─────────────────────────────────────────────────────────────────────────
 
-    ; Check whether any sequence tokens are present at all
-    ; Simple check: just look for {key: or {wait: or {focus: anywhere in the string
     hasSequence := (InStr(resolved, "{key:") || InStr(resolved, "{wait:") || InStr(resolved, "{focus:"))
 
     if (!hasSequence) {
-        ; ── Simple (no-sequence) path – original behaviour ──────────────────
-        cursorPos := 0
-        if (RegExMatch(resolved, "\{cursor(?::(\d+))?\}", &m)) {
-            if (m[1] != "")
-                cursorPos := Integer(m[1])
-            else
-                cursorPos := StrLen(resolved) - InStr(resolved, "{cursor}") + 1 - StrLen(m[0])
-            resolved := StrReplace(resolved, m[0], "")
-        }
-        SendExpandText(resolved, config)
+        ; ── Simple (no-sequence) path ───────────────────────────────────────
+        cursorPos := TakeCursorMarker(&resolved)
+        if (resolved = "")
+            return
+        SendExpandText(resolved, config, true)
         if (cursorPos > 0)
-            Send("{Left " . cursorPos . "}")
-        ReleaseStuckModifiers()
+            Send("{Left " . (cursorPos + 1) . "}")   ; +1 for the trailing space
+        ; Undo deletes exactly what was typed. Once the caret has moved
+        ; back into the text, backspacing would delete the wrong characters.
+        RecordExpansionHistory(sc, sc, cursorPos > 0 ? -1 : StrLen(resolved) + 1)
         return
     }
 
@@ -2407,7 +2575,6 @@ DoExpand(text, sc) {
     ; Walk character-by-character through resolved, collecting text segments
     ; and sequence tokens, then execute them in order.
 
-    cursorPos := 0
     si        := 1
     sLen      := StrLen(resolved)
     textAccum := ""
@@ -2436,23 +2603,17 @@ DoExpand(text, sc) {
                 }
                 seqTok := SubStr(resolved, si, sj - si)
 
-                ; Flush any accumulated text first
+                ; Flush text typed before this token - no trailing space here.
+                ; ({cursor} only works in the final text of a sequence.)
                 if (textAccum != "") {
-                    ; Handle {cursor} in accumulated text
-                    if (RegExMatch(textAccum, "\{cursor(?::(\d+))?\}", &cm)) {
-                        if (cm[1] != "")
-                            cursorPos := Integer(cm[1])
-                        else
-                            cursorPos := StrLen(textAccum) - InStr(textAccum, "{cursor}") + 1 - StrLen(cm[0])
-                        textAccum := StrReplace(textAccum, cm[0], "")
-                    }
-                    SendExpandText(textAccum, config)
+                    TakeCursorMarker(&textAccum)
+                    if (textAccum != "")
+                        SendExpandText(textAccum, config, false)
                     textAccum := ""
                 }
 
                 ; Parse and execute the token
                 ; seqTok is like {key:VALUE} or {wait:500} or {focus:Title}
-                ; Fix 5: guard against malformed tokens like {key:} with empty value
                 if (!RegExMatch(seqTok, "^\{(key|wait|focus):(.+)\}$", &stok)) {
                     si := sj
                     continue  ; skip malformed token silently
@@ -2468,7 +2629,7 @@ DoExpand(text, sc) {
                     Sleep(config["Performance"]["SequenceDelay"])
                     Send(stokValue)
                 } else if (stokType = "wait") {
-                    ms := Integer(stokValue)
+                    ms := IsInteger(stokValue) ? Integer(stokValue) : 0
                     if (ms > 0)
                         Sleep(ms)
                 } else if (stokType = "focus") {
@@ -2490,52 +2651,98 @@ DoExpand(text, sc) {
         si++
     }
 
-    ; Flush remaining text
+    ; Final text gets the trailing space and may position the caret
+    cursorPos := 0
     if (textAccum != "") {
-        if (RegExMatch(textAccum, "\{cursor(?::(\d+))?\}", &cm)) {
-            if (cm[1] != "")
-                cursorPos := Integer(cm[1])
-            else
-                cursorPos := StrLen(textAccum) - InStr(textAccum, "{cursor}") + 1 - StrLen(cm[0])
-            textAccum := StrReplace(textAccum, cm[0], "")
-        }
-        SendExpandText(textAccum, config)
+        cursorPos := TakeCursorMarker(&textAccum)
+        if (textAccum != "")
+            SendExpandText(textAccum, config, true)
     }
-
     if (cursorPos > 0)
-        Send("{Left " . cursorPos . "}")
-    ReleaseStuckModifiers()
+        Send("{Left " . (cursorPos + 1) . "}")
+
+    ; Sequences send keystrokes that can't be reversed by backspacing
+    RecordExpansionHistory(sc, sc, -1)
 }
 
-; Helper – sends a text chunk, choosing SendEvent for large blocks
-SendExpandText(txt, cfg) {
-    ; Use clipboard paste for all expansions - works in browsers and all apps
+; Removes a {cursor} or {cursor:N} marker from text and returns how many
+; characters left of the end of the text the caret should go (0 = none).
+TakeCursorMarker(&text) {
+    if (!RegExMatch(text, "\{cursor(?::(\d+))?\}", &m))
+        return 0
+    if (m[1] != "")
+        pos := Integer(m[1])
+    else
+        pos := StrLen(text) - m.Pos + 1 - m.Len
+    text := SubStr(text, 1, m.Pos - 1) . SubStr(text, m.Pos + m.Len)
+    ; Any further markers are ignored
+    text := RegExReplace(text, "\{cursor(?::\d+)?\}")
+    return pos
+}
+
+; Puts text on the clipboard while asking Windows to keep it out of
+; clipboard history (Win+V) and cloud clipboard sync - expansions may
+; contain private information. Falls back to a normal copy on failure.
+SetClipboardPrivate(txt) {
+    opened := false
+    loop 5 {
+        if (DllCall("OpenClipboard", "Ptr", A_ScriptHwnd)) {
+            opened := true
+            break
+        }
+        Sleep(20)
+    }
+    if (!opened) {
+        A_Clipboard := txt
+        return
+    }
+    try {
+        DllCall("EmptyClipboard")
+        ; The text itself (CF_UNICODETEXT = 13)
+        hText := DllCall("GlobalAlloc", "UInt", 0x42, "UPtr", (StrLen(txt) + 1) * 2, "Ptr")
+        pText := DllCall("GlobalLock", "Ptr", hText, "Ptr")
+        StrPut(txt, pText, "UTF-16")
+        DllCall("GlobalUnlock", "Ptr", hText)
+        if (!DllCall("SetClipboardData", "UInt", 13, "Ptr", hText, "Ptr")) {
+            DllCall("GlobalFree", "Ptr", hText)
+            throw Error("SetClipboardData failed")
+        }
+        ; Privacy markers recognised by Windows 10/11 clipboard history
+        for , fmtName in ["ExcludeClipboardContentFromMonitorProcessing",
+                          "CanIncludeInClipboardHistory",
+                          "CanUploadToCloudClipboard"] {
+            fmt  := DllCall("RegisterClipboardFormat", "Str", fmtName, "UInt")
+            hVal := DllCall("GlobalAlloc", "UInt", 0x42, "UPtr", 4, "Ptr")   ; zeroed DWORD = "no"
+            if (fmt && hVal && !DllCall("SetClipboardData", "UInt", fmt, "Ptr", hVal, "Ptr"))
+                DllCall("GlobalFree", "Ptr", hVal)
+        }
+        DllCall("CloseClipboard")
+    } catch {
+        DllCall("CloseClipboard")
+        A_Clipboard := txt
+    }
+}
+
+; Types a chunk of text by pasting it, then restores the user's clipboard
+SendExpandText(txt, cfg, addSpace := true) {
+    tail := addSpace ? " " : ""
     savedClip := ClipboardAll()
-    A_Clipboard := txt
+    SetClipboardPrivate(txt)
     if (ClipWait(1)) {
         Send("^v")
-        Sleep(150)  ; wait for target app to process paste before sending space
-        Send(" ")   ; send space as separate keystroke - not clipped, not trimmed
+        Sleep(150)          ; let the target app process the paste
+        if (addSpace)
+            Send(" ")       ; space as a separate keystroke - not trimmed by the app
+        Sleep(100)          ; slow apps (RDP, Electron) may still be reading the clipboard
     } else {
+        ; Clipboard unavailable - type the text instead ({Text} mode, so
+        ; characters like ! ^ + { } are typed literally)
         if (StrLen(txt) > cfg["Performance"]["LargeTextThreshold"])
-            SendEvent(txt . " ")
+            SendEvent("{Text}" . txt . tail)
         else
-            SendText(txt . " ")
+            SendText(txt . tail)
     }
     A_Clipboard := savedClip
-}
-
-; Helper - releases any modifier key that is logically "down" but not
-; physically held. Fast typing during an expansion can leave Shift (or
-; Ctrl) stuck in the down state, which makes everything type uppercase
-; and causes Shift+Restart to boot into Windows Advanced Startup.
-; Alt is deliberately excluded: a lone Alt-up can activate an app's
-; menu bar, and Alt is not a stuck-key risk for our send operations.
-ReleaseStuckModifiers() {
-    for , modKey in ["LShift", "RShift", "LCtrl", "RCtrl", "LWin", "RWin"] {
-        if (GetKeyState(modKey) && !GetKeyState(modKey, "P"))
-            Send("{" . modKey . " up}")
-    }
 }
 
 ; Placeholder registry
@@ -2671,12 +2878,13 @@ ResolvePlaceholders(text, depth := 0) {
 }
 
 LoadTextExpansions() {
-    global textExpansionPath, loadedExpansions, registeredExpansions
+    global textExpansionPath, loadedExpansions, registeredExpansions, instantExpansions
     ; Disable previously registered hotstrings using stored options
     for sc, opts in registeredExpansions {
         try Hotstring(opts . sc, , "Off")
     }
     registeredExpansions := Map()
+    instantExpansions    := Map()
     loadedExpansions.Clear()
     if (!FileExist(textExpansionPath))
         return
@@ -2703,6 +2911,8 @@ LoadTextExpansions() {
                             Hotstring(opts . shortcut, MakeExpansionCallback(expansion, shortcut))
                             loadedExpansions[shortcut] := expansion
                             registeredExpansions[shortcut] := opts  ; store opts for clean unload
+                            if (instantForced)
+                                instantExpansions[shortcut] := true
                         } catch Error as e {
                             ; Skip invalid hotstring
                         }
@@ -2805,12 +3015,12 @@ InitializeFiles() {
 ; The = family: function keys, relative dates, utilities
 ;------------------------------------------------
 SeedDefaultExpansions() {
-    global textExpansionPath, config
+    global textExpansionPath, launcherPath, config
     wc := config["Triggers"]["WinCmd"]       ; default ";"
 
     defaults := [
-        ; ── Date shortcuts (= family) ──────────────────
-        ["-=",   "{date:MMMM d, yyyy}"],            ; full date
+        ; ── Date shortcuts ──────────────────────────────
+        ["-=",   "{date:MMMM d, yyyy}"],           ; full date
         ["=-",   "{date:MM/dd/yy}"],                ; short date
 
         ; ── Relative date shortcuts (= family) ──────────
@@ -2836,26 +3046,39 @@ SeedDefaultExpansions() {
         ["a=",   "{key:^a}"],                       ; Select all
         ["s=",   "{key:^s}"],                       ; Save
 
-        ; ── ; family - the curated built-in command set ─
-        ; All entries here work cleanly as typed triggers - no selection
-        ; or clipboard dependencies that the trigger characters would disrupt.
+        ; ── ; family - Windows commands ─────────────────
+        ; Note: Ctrl+Alt+Del is not included - Windows blocks scripts from
+        ; sending the Secure Attention Sequence.
         ;
-        ; File ops (typing the trigger doesn't disrupt these)
-        [wc . "s",  "{key:^s}"],                    ; Save (Ctrl+S)
-        [wc . "S",  "{key:^+s}"],                   ; Save As (Ctrl+Shift+S)
+        ; Design rule:
+        ;   lowercase = what you use most (copy, paste, save, line start/end...)
+        ;   CAPITAL    = the less frequent or riskier twin (Save As, Lock PC)
+        ;   8 = emoji picker (Shift+8 is *, matching SpeedKee's long-press *)
+        ;
+        ; This mirrors the original WinKeys design - your hands learn it once
+        ; and the same shortcuts work everywhere MultiShortcuts runs.
+        ;
+        ; Clipboard & editing
+        [wc . "c",  "{key:^c}"],                    ; Copy
+        [wc . "x",  "{key:^x}"],                    ; Cut
+        [wc . "v",  "{key:^v}"],                    ; Paste
+        [wc . "p",  "{key:^p}"],                    ; Print
+        [wc . "z",  "{key:^z}"],                    ; Undo
+        [wc . "y",  "{key:^y}"],                    ; Redo
+        [wc . "a",  "{key:^a}"],                    ; Select All
+        [wc . "A",  "{key:^a}{key:^c}"],            ; Select All and Copy - one step, so the
+                                                    ; selection is copied before anything is typed
+        [wc . "f",  "{key:^f}"],                    ; Find
+        [wc . "h",  "{key:^h}"],                    ; Find & Replace
+
+        ; File ops
+        [wc . "s",  "{key:^s}"],                    ; Save
+        [wc . "S",  "{key:^+s}"],                   ; Save As
         [wc . "n",  "{key:^n}"],                    ; New
         [wc . "o",  "{key:^o}"],                    ; Open
-        [wc . "p",  "{key:^p}"],                    ; Print
         [wc . "w",  "{key:^w}"],                    ; Close tab / window
-        [wc . "r",  "{key:F5}"],                    ; Refresh
 
-        ; Editing - the safe ones
-        [wc . "A",  "{key:^a}{wait:50}{key:^c}"],   ; Select All AND Copy (capital)
-
-        ; App switching
-        [wc . "a",  "{key:!{Tab}}"],                ; Switch app - Alt+Tab
-
-        ; Document navigation (cursor moves, no content risk)
+        ; Document navigation
         [wc . "t",  "{key:^{Home}}"],               ; Top of page (Ctrl+Home)
         [wc . "b",  "{key:^{End}}"],                ; Bottom of page (Ctrl+End)
         [wc . "u",  "{key:{PgUp}}"],                ; Page Up
@@ -2863,17 +3086,26 @@ SeedDefaultExpansions() {
         [wc . "l",  "{key:{Home}}"],                ; Line start
         [wc . "e",  "{key:{End}}"],                 ; Line end
 
-        ; Window management
+        ; Window snap (arrows point the way)
         [wc . "<",  "{key:#{Left}}"],               ; Snap window left (Win+Left)
         [wc . ">",  "{key:#{Right}}"],              ; Snap window right (Win+Right)
-        [wc . "m",  "{key:#{Down}}"],               ; Minimize window
 
-        ; CAPITALS - paired actions
-        [wc . "L",  "{key:#l}"],                    ; Lock PC (Win+L)
-        [wc . "E",  "{key:#.}"],                    ; Emoji picker (Win+.)
-        [wc . "T",  "{key:^+{Escape}}"],            ; Task Manager (Ctrl+Shift+Esc)
+        ; Utility
+        [wc . "r",  "{key:F5}"],                    ; Refresh
+        [wc . "8",  "{key:#.}"],                    ; Emoji picker (Win+.)
+        [wc . "k",  "{key:^+{Escape}}"],            ; Task Manager (k for "kill")
+        [wc . "m",  "{key:#{Down}}"],               ; Minimize window
+        [wc . "g",  "{key:^g}"],                    ; Go to line
+
+        ; ── ; family CAPITALS - second meanings for select letters ──
+        [wc . "L",  "{key:#l}"],                    ; Lock PC (capital = harder to hit by accident)
+        [wc . "E",  "{key:{End}}"],                 ; Line end (same as ;e)
     ]
-    existing := FileExist(textExpansionPath) ? FileRead(textExpansionPath, "UTF-8") : ""
+    ; Check BOTH files: a trigger already used by a launcher (for example
+    ; an older version's ;c Calculator) must not get a second, clashing
+    ; built-in - two hotstrings with one trigger fight over it.
+    existing := (FileExist(textExpansionPath) ? FileRead(textExpansionPath, "UTF-8") : "")
+              . "`n" . (FileExist(launcherPath) ? FileRead(launcherPath, "UTF-8") : "")
     for entry in defaults {
         sc  := entry[1]
         exp := entry[2]
@@ -2881,40 +3113,31 @@ SeedDefaultExpansions() {
             LockedFileAppend(textExpansionPath, sc . " " . exp . "`n")
     }
 
-    ; Seed the ` launcher family - lives in launchers.ahk
+    ; Seed the ` family - these are app launchers, not text expansions,
+    ; so they live in launchers.ahk
     SeedDefaultLaunchers()
 }
 
 SeedDefaultLaunchers() {
-    global launcherPath, config
-    wc := config["Triggers"]["WinCmd"]       ; default ";"   - for built-in Windows apps
-    al := config["Triggers"]["AppLaunch"]    ; default "`"  - for user-facing launchers
+    global launcherPath, textExpansionPath, config
+    al := config["Triggers"]["AppLaunch"]    ; default "`"
 
     defaults := [
-        ; ── ; family - Windows built-in apps (single prefix) ──
-        ; These live in launchers.ahk (not text_expansion.ahk) because
-        ; they execute programs/URIs, not type text.
-        [wc . "c",  "calc.exe"],                    ; Calculator
-        [wc . "q",  "ms-screenclip:"],              ; Snipping Tool
-        [wc . "f",  "explorer.exe"],                ; File Explorer
-
-        ; ── ` family - AI launchers ─────────────────────
-        ; Backtick prefix is collision-free in normal typing.
-        ; For motivated users, the setup guide explains how to remap
-        ; CapsLock and middle-click to backtick for one-touch access.
-        [al . "a",  "https://chatgpt.com"],         ; ChatGPT
-        [al . "c",  "https://claude.ai"],           ; Claude
-        [al . "g",  "https://gemini.google.com"],   ; Gemini
-        [al . "p",  "https://perplexity.ai"],       ; Perplexity
-
-        ; ── ` family - Google quick-access (number row) ─
-        ; Backtick is right next to the 1 key, so `1 / `2 / `3 are
-        ; a tiny finger movement even without remapping CapsLock.
+        ; ── ` family - lowercase = web/AI, uppercase = system tools ──────────
+        [al . "c",  "https://claude.ai"],           ; Claude AI
+        [al . "o",  "https://chatgpt.com"],         ; ChatGPT
+        [al . "p",  "https://perplexity.ai"],       ; Perplexity AI
+        [al . "g",  "https://gemini.google.com"],   ; Google Gemini
+        [al . "w",  "https://en.wikipedia.org/wiki/Special:Search"], ; Wikipedia
         [al . "1",  "https://voice.google.com"],    ; Google Voice
         [al . "2",  "https://mail.google.com"],     ; Gmail
         [al . "3",  "https://calendar.google.com"], ; Google Calendar
+        [al . "C",  "calc.exe"],                    ; Calculator  (capital = system)
+        [al . "S",  "ms-screenclip:"],              ; Snipping Tool (capital = system)
     ]
-    existing := FileExist(launcherPath) ? FileRead(launcherPath, "UTF-8") : ""
+    ; Check both files, as in SeedDefaultExpansions
+    existing := (FileExist(launcherPath) ? FileRead(launcherPath, "UTF-8") : "")
+              . "`n" . (FileExist(textExpansionPath) ? FileRead(textExpansionPath, "UTF-8") : "")
     for entry in defaults {
         sc  := entry[1]
         exp := entry[2]
@@ -3014,13 +3237,8 @@ ReloadScript() {
 }
 
 ToggleMacrosPause() {
-    global config, activeInputHook
+    global config
     if (!A_IsSuspended) {
-        ; Kill any active combo InputHook before suspending
-        if (activeInputHook != "") {
-            try activeInputHook.Stop()
-            activeInputHook := ""
-        }
         Suspend(true)
         TraySetIcon("shell32.dll", 131)
         TrayTip("PAUSED", "All macros paused - press " .
@@ -3028,19 +3246,332 @@ ToggleMacrosPause() {
         PlayFeedback("ErrorSound")
     } else {
         Suspend(false)
-        SetAppIcon()
+        TraySetIcon("shell32.dll", 46)
         TrayTip("ACTIVE", "All macros are active", "Iconi")
         PlayFeedback("ExpandSound")
     }
     UpdateTrayTooltip()
 }
 
+;------------------------------------------------
+; HOLD KEYS  (optional, off by default - tray menu)
+;   Semicolon key:  tap = types it,  hold + another key = Ctrl + that key
+;   Backtick key (or Caps Lock remapped to backtick):
+;                   tap = types it,  hold + another key = Alt + that key
+; Lets the pinky reach Ctrl and Alt without leaving the home row, and
+; copies a partial selection (typing ;c can't - the ; replaces it).
+; Works on the physical keys, whatever the trigger characters are set to.
+; Caps Lock (on by default): tap = backtick, hold + key = Alt,
+;   Shift + Caps Lock = the normal Caps Lock on/off.
+; Middle mouse button (option): click = backtick, hold + key = Ctrl - the Ctrl
+;   for when the right hand is on the mouse and can't reach the semicolon.
+; Saved in prefs.ini [HoldKeys] Enabled=0|1, CapsLock=0|1, MiddleButton=0|1,
+;   HoldMs=100..1000
+;------------------------------------------------
+; (the holdKeys* globals are declared in GLOBAL STATE near the top)
 
+LoadHoldKeysPrefs() {
+    global prefsPath, holdKeysOn, holdKeysMs, holdKeysNews, capsKeyOn, mouseKeyOn, mouseKeyMode
+    ; Hold keys start ON for everyone.
+    ;   New install (no prefs.ini yet): CheckFirstRun saves the setting and
+    ;   the welcome message announces it.
+    ;   Upgrade (prefs.ini without a [HoldKeys] section): saved here, and a
+    ;   one-time What's New message announces it (ShowHoldKeysNews).
+    ; Caps Lock and the middle mouse button (like the semicolon) follow the
+    ; same rule: on for everyone, announced once.
+    if (!FileExist(prefsPath)) {
+        holdKeysOn   := true
+        capsKeyOn    := true
+        mouseKeyOn   := true
+        mouseKeyMode := "ctrl"
+        return
+    }
+    try {
+        saved := IniRead(prefsPath, "HoldKeys", "Enabled", "unset")
+        if (saved = "unset") {
+            holdKeysOn   := true
+            holdKeysNews := true
+            IniWrite("1", prefsPath, "HoldKeys", "Enabled")
+        } else {
+            holdKeysOn := (saved = "1")
+        }
+        caps := IniRead(prefsPath, "HoldKeys", "CapsLock", "unset")
+        if (caps = "unset") {
+            capsKeyOn    := true
+            holdKeysNews := true
+            IniWrite("1", prefsPath, "HoldKeys", "CapsLock")
+        } else {
+            capsKeyOn := (caps = "1")
+        }
+        mb := IniRead(prefsPath, "HoldKeys", "MiddleButton", "unset")
+        if (mb = "unset") {
+            mb           := "ctrl"
+            holdKeysNews := true
+            IniWrite(mb, prefsPath, "HoldKeys", "MiddleButton")
+        }
+        mouseKeyOn   := (mb = "alt" || mb = "ctrl" || mb = "1")
+        mouseKeyMode := (mb = "alt") ? "alt" : "ctrl"
+        ms := IniRead(prefsPath, "HoldKeys", "HoldMs", "200")
+        if (IsInteger(ms) && ms >= 100 && ms <= 1000)
+            holdKeysMs := Integer(ms)
+    }
+}
 
+; Turns the key and button hotkeys on or off to match the settings.
+; Input level 1: the hotkeys ignore the characters this script sends for
+; a tap (sent at SendLevel 1), while the script's own hotstrings - input
+; level 0 - still see them, so ;c `c and the rest keep working.
+ApplyHoldKeys() {
+    global holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
+    state  := holdKeysOn ? "On" : "Off"
+    cstate := capsKeyOn  ? "On" : "Off"
+    mstate := mouseKeyOn ? "On" : "Off"
+    try {
+        Hotkey("*$vkBA", (*) => HoldKey("vkBA", 0xBA, "LCtrl"), state . " I1")
+        Hotkey("*$vkC0", (*) => HoldKey("vkC0", 0xC0, "LAlt"),  state . " I1")
+        ; Caps Lock types a backtick on a tap
+        Hotkey("*CapsLock", CapsLockKey, cstate . " I1")
+        ; The middle button copies Caps Lock (` / Alt) or the semicolon (; / Ctrl)
+        Hotkey("*MButton", MiddleButtonKey, mstate . " I1")
+        if (capsKeyOn && GetKeyState("CapsLock", "T"))
+            SetCapsLockState("Off")      ; a tap no longer switches it off
+    } catch Error as err {
+        MsgBox("Could not set up hold keys: " . err.Message, "Hold Keys", "Icon!")
+    }
+}
+
+; Caps Lock: Shift + Caps Lock keeps the normal Caps Lock on/off;
+; otherwise tap = backtick, hold + key = Alt
+CapsLockKey(*) {
+    if (GetKeyState("Shift", "P")) {
+        SetCapsLockState(GetKeyState("CapsLock", "T") ? "Off" : "On")
+        KeyWait("CapsLock")
+        return
+    }
+    HoldKey("CapsLock", 0x14, "LAlt", "vkC0")
+}
+
+ToggleCapsKey(*) {
+    global capsKeyOn, prefsPath, capsKeyMenu
+    capsKeyOn := !capsKeyOn
+    try IniWrite(capsKeyOn ? "1" : "0", prefsPath, "HoldKeys", "CapsLock")
+    ApplyHoldKeys()
+    if (capsKeyOn) {
+        A_TrayMenu.Check(capsKeyMenu)
+        TrayTip("Caps Lock Changed",
+                "Tap Caps Lock = `` (for your `` launchers).`n" .
+                "Hold Caps Lock + a key = Alt + that key.`n" .
+                "Shift + Caps Lock = normal Caps Lock.", "Iconi")
+    } else {
+        A_TrayMenu.Uncheck(capsKeyMenu)
+        TrayTip("Caps Lock Normal", "Caps Lock works as usual again.", "Iconi")
+    }
+}
+
+; Middle mouse button: Shift + middle = the normal middle click (pressed and
+; released with the button, so scroll-dragging works too); otherwise it acts
+; like Caps Lock or the semicolon, depending on the chosen mode
+MiddleButtonKey(*) {
+    global mouseKeyMode
+    if (GetKeyState("Shift", "P")) {
+        Send("{MButton down}")       ; plain Send releases Shift for the click
+        KeyWait("MButton")
+        Send("{MButton up}")
+        return
+    }
+    if (mouseKeyMode = "alt")
+        HoldKey("MButton", 0, "LAlt", "vkC0")
+    else
+        HoldKey("MButton", 0, "LCtrl", "vkBA")
+}
+
+; Tray sub-menu for the middle mouse button: Off / like Caps Lock / like ;
+
+BuildMouseMenu() {
+    global mouseSubMenu, mouseItemOff, mouseItemAlt, mouseItemCtrl
+    mouseSubMenu := Menu()
+    mouseSubMenu.Add(mouseItemOff,  (*) => SetMouseMode("off"))
+    mouseSubMenu.Add(mouseItemAlt,  (*) => SetMouseMode("alt"))
+    mouseSubMenu.Add(mouseItemCtrl, (*) => SetMouseMode("ctrl"))
+    MarkMouseMenu()
+    return mouseSubMenu
+}
+
+MarkMouseMenu() {
+    global mouseSubMenu, mouseKeyOn, mouseKeyMode, mouseItemOff, mouseItemAlt, mouseItemCtrl
+    if (!IsObject(mouseSubMenu))
+        return
+    for , item in [mouseItemOff, mouseItemAlt, mouseItemCtrl]
+        mouseSubMenu.Uncheck(item)
+    mouseSubMenu.Check(!mouseKeyOn ? mouseItemOff
+                     : mouseKeyMode = "alt" ? mouseItemAlt : mouseItemCtrl)
+}
+
+SetMouseMode(mode) {
+    global mouseKeyOn, mouseKeyMode, prefsPath
+    mouseKeyOn := (mode != "off")
+    if (mouseKeyOn)
+        mouseKeyMode := mode
+    try IniWrite(mouseKeyOn ? mode : "0", prefsPath, "HoldKeys", "MiddleButton")
+    ApplyHoldKeys()
+    MarkMouseMenu()
+    if (!mouseKeyOn) {
+        TrayTip("Middle Button Normal", "The middle button works as usual again.", "Iconi")
+    } else if (mode = "alt") {
+        TrayTip("Middle Button: like Caps Lock",
+                "Click it, then a letter = that `` launcher.`n" .
+                "Hold it + a key = Alt + that key.`n" .
+                "Shift + middle click = the normal middle click.", "Iconi")
+    } else {
+        TrayTip("Middle Button: like the semicolon",
+                "Click it, then a letter = that `; command (click then v = Paste).`n" .
+                "Hold it + a key = Ctrl + that key (hold + C = Copy).`n" .
+                "Shift + middle click = the normal middle click.", "Iconi")
+    }
+}
+
+; One-time announcement for people upgrading from a version without hold keys
+
+ShowHoldKeysNews() {
+    MsgBox(
+        "NEW - Ctrl and Alt, now on your home row:`n" .
+        "the same shortcuts, without the reach.`n" .
+        "`n" .
+        "SEMICOLON  -  hold it for Ctrl`n" .
+        "   hold `; + C = Copy,   hold `; + V = Paste`n" .
+        "`n" .
+        "CAPS LOCK  -  hold it for Alt, tap it for ```n" .
+        "   hold Caps Lock + Tab = switch windows`n" .
+        "   tap Caps Lock, then c = open Claude`n" .
+        "   Shift + Caps Lock = normal Caps Lock`n" .
+        "`n" .
+        "MIDDLE MOUSE BUTTON  -  works like `;`n" .
+        "   click it, then v = Paste`n" .
+        "   highlight, hold the wheel, tap C = Copy`n" .
+        "   Shift + middle click = normal middle click`n" .
+        "`n" .
+        "A quick tap of `; still types it, so your`n" .
+        "shortcuts work as before.`n" .
+        "`n" .
+        "To change any of this, right-click the tray icon.",
+        "What's New in MultiShortcuts Pro 2.0", "Iconi")
+}
+
+ToggleHoldKeys(*) {
+    global holdKeysOn, prefsPath, holdKeysMenu
+    holdKeysOn := !holdKeysOn
+    try IniWrite(holdKeysOn ? "1" : "0", prefsPath, "HoldKeys", "Enabled")
+    ApplyHoldKeys()
+    if (holdKeysOn) {
+        A_TrayMenu.Check(holdKeysMenu)
+        TrayTip("Hold Keys On",
+                "Hold `; and press a key for Ctrl (hold `; + C = copy).`n" .
+                "Hold `` or Caps Lock and press a key for Alt.`n" .
+                "A quick tap still types the character.", "Iconi")
+    } else {
+        A_TrayMenu.Uncheck(holdKeysMenu)
+        TrayTip("Hold Keys Off", "Semicolon and backtick type normally.", "Iconi")
+    }
+}
+
+SetHoldKeysTime(*) {
+    global holdKeysMs, prefsPath
+    IB := InputBox("How long a key must be held before it acts as Ctrl or Alt,`n" .
+                   "in milliseconds (1000 = one second).`n`n" .
+                   "Lower = quicker.  Higher = fewer slips when typing fast.`n" .
+                   "Default 200.  Allowed 100 to 1000.",
+                   "Hold Keys Timing", "w380 h190", holdKeysMs)
+    if (IB.Result = "Cancel")
+        return
+    v := Trim(IB.Value)
+    if (!IsInteger(v) || v < 100 || v > 1000) {
+        MsgBox("Please enter a whole number from 100 to 1000.", "Hold Keys Timing", "Icon!")
+        return
+    }
+    holdKeysMs := Integer(v)
+    try IniWrite(holdKeysMs, prefsPath, "HoldKeys", "HoldMs")
+    TrayTip("Hold Keys Timing", "Hold time set to " . holdKeysMs . " ms.", "Iconi")
+}
+
+; key = the physical key or button, tapKey = what a tap types (default: key)
+HoldKey(key, vkNum, modifier, tapKey := "") {
+    global holdKeysMs
+    typed := (tapKey != "") ? tapKey : key
+
+    ; Catch a key pressed while this one is still down - a fast roll like ";c"
+    ih := InputHook("L1")
+    ih.Start()
+    t0 := A_TickCount
+    result := ""
+    loop {
+        if (!ih.InProgress) {
+            result := "rolled"      ; another key came first: normal typing
+            break
+        }
+        if (!GetKeyState(key, "P")) {
+            result := "tap"         ; let go quickly
+            break
+        }
+        if (A_TickCount - t0 >= holdKeysMs) {
+            result := "hold"        ; held long enough to act as a modifier
+            break
+        }
+        Sleep(5)
+    }
+    if (ih.InProgress)
+        ih.Stop()
+
+    if (result = "tap") {
+        HoldKeyType(typed)
+        return
+    }
+    if (result = "rolled") {
+        ; Put this key first, then the one that was rolled onto, in order
+        HoldKeyType(typed)
+        SendLevel(1)
+        SendEvent("{Text}" . ih.Input)
+        SendLevel(0)
+        return
+    }
+
+    ; Held: act as the modifier until the key is released
+    state := {pressed: false}
+    watch := InputHook("V")                 ; V = keys still go through
+    watch.KeyOpt("{All}", "N")
+    watch.OnKeyDown := (hook, vk, sc) => (vk != vkNum ? state.pressed := true : 0)
+    Send("{Blind}{" . modifier . " down}")
+    watch.Start()
+    KeyWait(key)
+    watch.Stop()
+    if (modifier = "LAlt")
+        Send("{Blind}{vkE8}")               ; stops a lone Alt release opening menus
+    Send("{Blind}{" . modifier . " up}")
+    ; Held but used for no key: a key still types its character. Not the mouse
+    ; button - its hold may have been Ctrl + scroll (zoom) or Ctrl + click.
+    if (!state.pressed && key != "MButton")
+        HoldKeyType(typed)
+}
+
+; Types the key's character at SendLevel 1 so this script's own hotstrings
+; (the ; ` = families and custom shortcuts) still see it
+HoldKeyType(key) {
+    ; SendEvent, not Send: the default SendInput mode briefly removes the
+    ; keyboard hook, so this script's own hotstrings would never see the key
+    SendLevel(1)
+    SendEvent("{Blind}{" . key . "}")
+    SendLevel(0)
+}
+
+ReleaseHoldModifiers(*) {
+    global holdKeysOn, capsKeyOn, mouseKeyOn
+    if (holdKeysOn || capsKeyOn || mouseKeyOn)
+        Send("{LCtrl up}{LAlt up}")         ; never leave a modifier stuck on exit
+}
 
 ;------------------------------------------------
 ; Save stats on exit so nothing is lost
 OnExit((*) => SaveUsageStats())
+OnExit(ReleaseHoldModifiers)
 
 ;------------------------------------------------
 ; END OF SCRIPT
