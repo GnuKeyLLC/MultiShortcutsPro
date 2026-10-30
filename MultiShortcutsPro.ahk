@@ -1,8 +1,8 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.0.0 - 2026
+; MULTISHORTCUTS PRO v2.0.1 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -49,12 +49,24 @@ global config := Map(
     ),
     "Security", Map(
         "ConfirmDangerousTargets", true,
+        ; A .lnk whose destination Windows can't read is refused. Advanced
+        ; exception: prefs.ini [Security] AllowUncheckedShortcuts=1 lets you
+        ; add one after a warning - never through a CSV import.
+        "AllowUncheckedShortcuts", false,
         "MaxShortcutLength", 50,
         "MinShortcutLength", 2,
         "BlockedProtocols", ["cmd", "powershell", "runas", "regedit",
                              "ms-settings", "vbscript", "javascript",
                              "wscript", "cscript", "ms-msdt", "search-ms",
-                             "shell", "calculator", "ms-help", "file"],
+                             "shell", "calculator", "ms-help", "file",
+                             "ms-officecmd", "ms-appinstaller", "ms-cxh",
+                             "ms-cxh-full", "mk", "its", "ms-its", "mhtml",
+                             "hcp", "res", "ldap", "telnet"],
+        ; Link types that open without a question. Any other (spotify:,
+        ; zoommtg: ...) is allowed, but asks first when it is added.
+        "KnownProtocols", ["tel", "callto", "sms", "ms-screenclip",
+                           "ms-screensketch", "spotify", "zoommtg", "msteams",
+                           "slack", "onenote", "steam", "discord", "skype"],
         ; File types a launcher may open. Anything else (scripts, installers,
         ; .com, .scr, .js, .reg ...) is refused. Folders are always allowed.
         "AllowedExtensions", ["exe", "lnk",
@@ -70,7 +82,9 @@ global config := Map(
         "LargeTextThreshold", 6000,
         "FileWatchInterval",  5000,
         "SequenceDelay",      150,    ; ms between sequence tokens (key/wait/focus) - increase for slow apps
-        "ClipWaitTimeout",    3       ; seconds to wait for clipboard after Ctrl+C
+        "MaxWaitMs",          30000,  ; longest pause a {wait:} may make (30 s)
+        "ClipWaitTimeout",    3,      ; seconds to wait for clipboard after Ctrl+C
+        "ClipRestoreDelay",   250     ; ms after a paste before the old clipboard is put back
     ),
     "TextExpander", Map(
         "SmartTriggering", true,
@@ -120,6 +134,13 @@ global loadedExpansions      := Map()
 global registeredLaunchers   := []
 global registeredExpansions  := Map()  ; shortcut -> opts used for registration
 global instantExpansions     := Map()  ; shortcuts saved with the $$ instant-fire suffix
+global backupFailedFile  := ""        ; set when an automatic backup failed (see SavedNotice)
+global privateTyping     := false     ; true = type expansions, never use the clipboard
+global privateTypingMenu := "Type expansions directly (no clipboard)"
+global hidePreviews      := false     ; true = lists show shortcut names only
+global hidePreviewsMenu  := "Hide expansion text in lists"
+global allowCapture      := true      ; Alt+C capture (uses the normal clipboard)
+global allowCaptureMenu  := "Alt+C capture (uses the clipboard)"
 global expansionHistory  := []
 global usageStats        := Map()
 global lvSortCol         := Map("launchers", 0, "expansions", 0)
@@ -149,9 +170,9 @@ CheckFileTimes() {
     global launcherPath, textExpansionPath, lastLauncherMod, lastExpMod, lastReload
     if (A_TickCount - lastReload < 5000)
         return
-    ; Don't reload if a write is in progress (lock file present and recent)
+    ; Don't reload while a save is in progress (its lock is held open)
     for , lp in [launcherPath . ".lock", textExpansionPath . ".lock"] {
-        if (FileExist(lp) && !IsStaleLock(lp))
+        if (LockIsHeld(lp))
             return
     }
     tLauncher := 0
@@ -171,11 +192,13 @@ CheckFileTimes() {
         } catch {
             return  ; File still busy - skip this cycle, will retry on next poll
         }
-        lastLauncherMod := tLauncher
-        lastExpMod      := tExp
-        lastReload      := A_TickCount
-        ; Don't reload if user has a script GUI open - would wipe unsaved input
-        if (!WinExist("ahk_class AutoHotkeyGUI")) {
+        ; Don't reload while one of this script's windows is open - it would
+        ; wipe unsaved input. The times aren't recorded yet, so the change
+        ; is picked up on a later check once the window is closed.
+        if (!WinExist("ahk_class AutoHotkeyGUI ahk_pid " . DllCall("GetCurrentProcessId"))) {
+            lastLauncherMod := tLauncher
+            lastExpMod      := tExp
+            lastReload      := A_TickCount
             TrayTip("File Change Detected",
                     "Shortcuts file modified externally.`nReloading in 2 seconds...", "Iconi")
             SetTimer(ReloadScriptSilent, -2000)
@@ -201,6 +224,7 @@ SafeInitialize() {
         LoadTriggerPrefs()
         LoadModePref()
         LoadHoldKeysPrefs()
+        LoadSecurityPrefs()
 
         ; Always set up the data files - seeding the built-in ; ` = families
         ; happens here. Starter mode users get them too.
@@ -236,18 +260,23 @@ SafeInitialize() {
         }
 
         SetupTrayMenu()
-        CheckFirstRun()
-        if (holdKeysNews)
+        firstRun := CheckFirstRun()
+        if (holdKeysNews && !firstRun)
             SetTimer(ShowHoldKeysNews, -1500)   ; after start-up, so it doesn't block it
+        justUnlocked := (appMode = "full" && TakeQuickStartFlag())
+        if (justUnlocked)
+            SetTimer(ShowFullQuickStart, -1500)
 
-        if (appMode = "full") {
-            TrayTip("MultiShortcuts v2.0.0 - Full",
+        if (firstRun || justUnlocked) {
+            ; the Quick Start message is on its way - no tray notice on top of it
+        } else if (appMode = "full") {
+            TrayTip("MultiShortcuts v2.0.1 - Full",
                 "Online - " . loadedLaunchers.Count . " launchers, " .
                 loadedExpansions.Count . " expansions`nAuto-reload active", "Iconi")
         } else {
             starterMsg := "Ready! Built-in shortcuts work right away."
             starterMsg .= "`nRight-click the tray icon to learn more."
-            TrayTip("MultiShortcuts v2.0.0 - Starter", starterMsg, "Iconi")
+            TrayTip("MultiShortcuts v2.0.1 - Starter", starterMsg, "Iconi")
         }
     } catch Error as err {
         MsgBox("Initialization failed: " . err.Message .
@@ -258,21 +287,12 @@ SafeInitialize() {
 ;------------------------------------------------
 ; FIRST RUN SETUP
 ;------------------------------------------------
+; Saves the starting settings on a new install and shows the Quick Start.
+; Returns true on a new install.
 CheckFirstRun() {
-    global prefsPath, config, appMode, holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
+    global prefsPath, holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
     if (FileExist(prefsPath))
-        return
-
-    result := MsgBox(
-        "Welcome to MultiShortcuts!`n`n" .
-        "Would you like sound feedback when shortcuts fire?`n`n" .
-        "You can change this anytime from the tray menu.",
-        "First Run Setup", "YesNo Iconi")
-
-    if (result = "Yes") {
-        config["Feedback"]["PlaySounds"] := true
-        try A_TrayMenu.Check("Sound Feedback")
-    }
+        return false
 
     try FileAppend("FirstRun=done`n", prefsPath)
     if (holdKeysOn)
@@ -281,52 +301,106 @@ CheckFirstRun() {
         try IniWrite("1", prefsPath, "HoldKeys", "CapsLock")
     try IniWrite(mouseKeyOn ? mouseKeyMode : "0", prefsPath, "HoldKeys", "MiddleButton")
 
+    ; After start-up, so the hotkeys are live while the message is open
+    SetTimer(() => ShowQuickStart(true), -1000)
+    return true
+}
+
+; Tray menu "Quick Start" and the first-run welcome
+ShowQuickStart(firstRun := false) {
+    global appMode
+    if (appMode = "full") {
+        ShowFullQuickStart()
+        return
+    }
+    ShowStarterQuickStart(firstRun)
+}
+
+; Hold-key lines that match the current settings, then how to change them.
+; Shared by the Quick Start and the one-time What's New message.
+HoldKeysIntro() {
+    global holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
+    msg := "CTRL AND ALT, NOW ON YOUR HOME ROW`n"
+    if (holdKeysOn)
+        msg .= "   SEMICOLON:  hold = Ctrl (hold `; + C = Copy),  tap = types `;`n"
+    else
+        msg .= "   SEMICOLON:  types `;  (hold for Ctrl is off)`n"
+    if (capsKeyOn) {
+        msg .= "   CAPS LOCK:  hold = Alt (hold + Tab = switch windows),`n"
+        msg .= "      tap = `` for launchers (tap, then c = open Claude)`n"
+        msg .= "      ALL CAPS?  Shift + Caps Lock turns real Caps Lock on/off.`n"
+    } else {
+        msg .= "   CAPS LOCK:  the normal Caps Lock`n"
+    }
+    if (!mouseKeyOn)
+        msg .= "   MIDDLE MOUSE BUTTON:  the normal middle click`n"
+    else if (mouseKeyMode = "alt")
+        msg .= "   MIDDLE MOUSE BUTTON:  hold = Alt,  click = `` (click, then c = Claude)`n"
+    else
+        msg .= "   MIDDLE MOUSE BUTTON:  hold = Ctrl (highlight, hold, tap C = Copy),`n      click = `; (click, then v = Paste)`n"
+    if (mouseKeyOn)
+        msg .= "      Shift + middle click = the normal middle click.`n"
+    msg .= "`nCHANGE ANY OF IT - right-click the tray icon:`n"
+    msg .= "   Hold `; for Ctrl, hold `` for Alt  -  tick or untick`n"
+    msg .= "   Caps Lock: tap = ``, hold = Alt  -  untick for the normal Caps Lock`n"
+    msg .= "   Middle mouse button  -  like `; (Ctrl), like Caps Lock (Alt), or Off`n"
+    msg .= "   Hold Keys Timing...  -  how long a hold takes (default 200 ms)`n`n"
+    return msg
+}
+
+ShowStarterQuickStart(firstRun := false) {
+    global config
     wc := config["Triggers"]["WinCmd"]
     al := config["Triggers"]["AppLaunch"]
 
-    if (appMode = "starter") {
-        MsgBox(
-            "You're running MultiShortcuts in Starter mode.`n`n" .
-            "Try these right now - they work anywhere you can type:`n`n" .
-            "  " . wc . "c  - Copy           " . wc . "v  - Paste`n" .
-            "  " . wc . "s  - Save           " . wc . "p  - Print`n" .
-            "  " . wc . "t  - Top of page    " . wc . "b  - Bottom`n" .
-            "  " . al . "S  - Snip Tool      " . al . "C  - Calculator`n" .
-            "  -=  - Today's date  1m=  - One month from now`n`n" .
-            "NEW - Ctrl and Alt, now on your home row:`n" .
-            "the same shortcuts, without the reach.`n" .
-            "`n" .
-            "SEMICOLON  -  hold it for Ctrl`n" .
-            "   hold `; + C = Copy,   hold `; + V = Paste`n" .
-            "`n" .
-            "CAPS LOCK  -  hold it for Alt, tap it for ```n" .
-            "   hold Caps Lock + Tab = switch windows`n" .
-            "   tap Caps Lock, then c = open Claude`n" .
-            "   Shift + Caps Lock = normal Caps Lock`n" .
-            "`n" .
-            "MIDDLE MOUSE BUTTON  -  works like `;`n" .
-            "   click it, then v = Paste`n" .
-            "   highlight, hold the wheel, tap C = Copy`n" .
-            "   Shift + middle click = normal middle click`n" .
-            "`n" .
-            "A quick tap of `; still types it, so your`n" .
-            "shortcuts work as before.`n" .
-            "Change any of this in the tray menu.`n" .
-            "`n" .
-            "When you want more - custom shortcuts, an editor GUI and more - `n" .
-            "right-click the tray icon and choose * Unlock Full Features.",
-            "MultiShortcuts - Starter Mode", "Iconi")
-    } else {
-        MsgBox(
-            "Quick Start (Full mode):`n`n" .
-            "  Alt+T  - Add a text expansion`n" .
-            "  Alt+A  - Add an app launcher`n" .
-            "  Alt+C  - Capture selected text`n" .
-            "  Alt+E  - Edit all shortcuts`n" .
-            "  Alt+H  - Help`n`n" .
-            "Right-click the tray icon for all options.",
-            "MultiShortcuts - Getting Started", "Iconi")
+    msg := firstRun ? "Welcome to MultiShortcuts Pro! All of this works now, in any app.`n`n" : ""
+    msg .= HoldKeysIntro()
+    msg .= "Just these keys already make your computer easier to use.`n"
+    msg .= "Everything else is a bonus, whenever you want it.`n`n"
+    msg .= "TYPE THESE ANYWHERE`n"
+    msg .= "   " . wc . "c  Copy       " . wc . "v  Paste      " . wc . "s  Save`n"
+    msg .= "   " . al . "c  Claude     " . al . "S  Snip       -=  Today's date`n`n"
+    msg .= "Tray menu > Show Built-in Shortcuts lists them all.`n"
+    msg .= "Want your own shortcuts? Choose * Unlock Full Features (free)."
+
+    if (!firstRun || FileExist(GetStartupLinkPath())) {
+        MsgBox(msg, "MultiShortcuts Pro - Quick Start", "Iconi")
+        return
     }
+    msg .= "`n`nStart MultiShortcuts Pro automatically with Windows?"
+    if (MsgBox(msg, "MultiShortcuts Pro - Quick Start", "YesNo Iconi") = "Yes")
+        ToggleStartup()
+}
+
+ShowFullQuickStart(*) {
+    global config, capsKeyOn
+    hk := config["Hotkeys"]
+    msg := "Full features are on. Your built-in shortcuts still work.`n`n"
+    msg .= "BUILD YOUR OWN`n"
+    msg .= "   " . HotkeyLabel(hk["AddExpansion"])        . "   Add text you type often`n"
+    msg .= "   " . HotkeyLabel(hk["AddWebLauncher"])      . "   Add a website or email`n"
+    msg .= "   " . HotkeyLabel(hk["AddLauncher"])         . "   Add an app`n"
+    msg .= "   " . HotkeyLabel(hk["AddDocumentLauncher"]) . "   Add a document or folder`n"
+    msg .= "   " . HotkeyLabel(hk["CaptureExpansion"])    . "   Turn selected text into a shortcut`n"
+    msg .= "   " . HotkeyLabel(hk["ShowEditGUI"])         . "   See and edit every shortcut`n`n"
+    if (capsKeyOn)
+        msg .= "Tip: hold Caps Lock + T is the same as Alt+T - no reach.`n`n"
+    msg .= HoldKeysIntro()
+    msg .= HotkeyLabel(hk["ShowHelp"]) . " lists everything. "
+    msg .= HotkeyLabel(hk["ReloadScript"]) . " reloads if a shortcut stops working."
+    MsgBox(msg, "MultiShortcuts Pro - Quick Start", "Iconi")
+}
+
+; True once, on the first start after unlocking Full mode
+TakeQuickStartFlag() {
+    global prefsPath
+    try {
+        if (IniRead(prefsPath, "Mode", "ShowQuickStart", "0") = "1") {
+            IniDelete(prefsPath, "Mode", "ShowQuickStart")
+            return true
+        }
+    }
+    return false
 }
 
 SetupHotkeys() {
@@ -374,10 +448,11 @@ SetupTrayMenu() {
 }
 
 SetupStarterTrayMenu() {
-    global config, holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu
+    global config, holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu, privateTyping, privateTypingMenu
     A_TrayMenu.Add("MultiShortcuts (Starter)", (*) => 0)
     A_TrayMenu.Disable("MultiShortcuts (Starter)")
     A_TrayMenu.Add()
+    A_TrayMenu.Add("Quick Start",              (*) => ShowQuickStart())
     A_TrayMenu.Add("Show Built-in Shortcuts",  (*) => ShowHelp())
     A_TrayMenu.Add("Trigger Keys Setup...",      (*) => ShowTriggerSetup())
     A_TrayMenu.Add(holdKeysMenu,                 ToggleHoldKeys)
@@ -393,6 +468,9 @@ SetupStarterTrayMenu() {
     A_TrayMenu.Add()
     A_TrayMenu.Add("Run on Windows Startup",   (*) => ToggleStartup())
     A_TrayMenu.Add("Sound Feedback",           (*) => ToggleSounds())
+    A_TrayMenu.Add(privateTypingMenu,          TogglePrivateTyping)
+    if (privateTyping)
+        A_TrayMenu.Check(privateTypingMenu)
     A_TrayMenu.Add("Reload Script",            (*) => Reload())
     A_TrayMenu.Add("Exit",                     (*) => ExitApp())
     A_TrayMenu.Default := "Show Built-in Shortcuts"
@@ -403,7 +481,9 @@ SetupStarterTrayMenu() {
 }
 
 SetupFullTrayMenu() {
-    global holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu
+    global holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu, privateTyping, privateTypingMenu
+    global hidePreviews, hidePreviewsMenu, allowCapture, allowCaptureMenu
+    A_TrayMenu.Add("Quick Start",             (*) => ShowQuickStart())
     A_TrayMenu.Add("Show Help",               (*) => ShowHelp())
     A_TrayMenu.Add("Edit Shortcuts (Alt+E)",  (*) => ShowEditGUI("launchers"))
     A_TrayMenu.Add()
@@ -424,6 +504,15 @@ SetupFullTrayMenu() {
     A_TrayMenu.Add()
     A_TrayMenu.Add("Run on Windows Startup",  (*) => ToggleStartup())
     A_TrayMenu.Add("Sound Feedback",          (*) => ToggleSounds())
+    A_TrayMenu.Add(privateTypingMenu,         TogglePrivateTyping)
+    if (privateTyping)
+        A_TrayMenu.Check(privateTypingMenu)
+    A_TrayMenu.Add(hidePreviewsMenu,          ToggleHidePreviews)
+    if (hidePreviews)
+        A_TrayMenu.Check(hidePreviewsMenu)
+    A_TrayMenu.Add(allowCaptureMenu,          ToggleAllowCapture)
+    if (allowCapture)
+        A_TrayMenu.Check(allowCaptureMenu)
     A_TrayMenu.Add("Trigger Keys Setup...",     (*) => ShowTriggerSetup())
     A_TrayMenu.Add(holdKeysMenu,                ToggleHoldKeys)
     A_TrayMenu.Add(capsKeyMenu,                 ToggleCapsKey)
@@ -446,13 +535,13 @@ SetupFullTrayMenu() {
 UpdateTrayTooltip() {
     global loadedLaunchers, loadedExpansions, appMode
     if (appMode = "starter") {
-        A_IconTip := "MultiShortcuts (Starter) v2.0.0" .
+        A_IconTip := "MultiShortcuts (Starter) v2.0.1" .
                      "`nBuilt-in trigger families active" .
                      "`nRight-click for menu - Unlock Full when ready"
         return
     }
     status   := A_IsSuspended ? "PAUSED" : "Active"
-    A_IconTip := "MultiShortcuts (Full) v2.0.0 (" . status . ")"
+    A_IconTip := "MultiShortcuts (Full) v2.0.1 (" . status . ")"
               . "`nLaunchers: "  . loadedLaunchers.Count
               . "   Expansions: " . loadedExpansions.Count
 }
@@ -469,34 +558,66 @@ MarkOwnWrite() {
     try lastExpMod      := FileExist(textExpansionPath) ? FileGetTime(textExpansionPath, "M") : 0
 }
 
-; A lock file older than 30 seconds is assumed to be left over from a
-; crash or power cut - no real save takes that long.
-IsStaleLock(lockPath) {
-    try return DateDiff(A_Now, FileGetTime(lockPath, "M"), "Seconds") > 30
-    return false
-}
-
-; Waits up to 5 seconds for another save to finish, then creates the lock.
-; Returns false if the file is still locked (caller must not write).
+; The lock is the lock file held OPEN with no sharing for the whole save.
+; While it is open, no other copy of this script can open (or delete) it,
+; however long the save takes - there is no "stale after N seconds" guess.
+; It is opened delete-on-close, so Windows removes it when the save ends,
+; and also if the program crashes or the PC loses power mid-save (the
+; handle closes with the process). A leftover lock file from an older
+; version is simply taken over.
+;
+; Waits up to 5 seconds for another save to finish. Returns the lock
+; handle, or 0 if the file is still locked (caller must not write).
 AcquireLock(lockPath) {
-    retries := 50    ; 5 s - allows for OneDrive/Dropbox sync delays
-    while (FileExist(lockPath) && retries > 0) {
-        if (IsStaleLock(lockPath)) {
-            try FileDelete(lockPath)
-            break
-        }
+    loop 50 {    ; 5 s - allows for OneDrive/Dropbox sync delays
+        ; GENERIC_READ|GENERIC_WRITE|DELETE, no sharing, OPEN_ALWAYS,
+        ; FILE_FLAG_DELETE_ON_CLOSE
+        h := DllCall("CreateFile", "Str", lockPath, "UInt", 0xC0010000, "UInt", 0,
+                     "Ptr", 0, "UInt", 4, "UInt", 0x04000080, "Ptr", 0, "Ptr")
+        if (h != -1)
+            return h
         Sleep(100)
-        retries--
     }
-    if (FileExist(lockPath))
-        return false
-    try FileAppend("", lockPath, "UTF-8")
-    return true
+    return 0
 }
 
-; Data files store one entry per line; real newlines become [NEWLINE]
+ReleaseLock(h) {
+    if (h)
+        DllCall("CloseHandle", "Ptr", h)    ; delete-on-close removes the file
+}
+
+; True while some save (this copy or another) holds the lock
+LockIsHeld(lockPath) {
+    if (!FileExist(lockPath))
+        return false
+    h := DllCall("CreateFile", "Str", lockPath, "UInt", 0x80000000, "UInt", 0,
+                 "Ptr", 0, "UInt", 3, "UInt", 0x80, "Ptr", 0, "Ptr")
+    if (h = -1)
+        return (A_LastError = 32)           ; ERROR_SHARING_VIOLATION = in use
+    DllCall("CloseHandle", "Ptr", h)
+    return false                            ; a leftover file, not a live lock
+}
+
+; Data files store one entry per line, so real line breaks are written as
+; [NEWLINE]. Text that itself contains "[NEWLINE]" gets an extra backslash
+; ("[NEWLINE\]", "[NEWLINE\\]" ...) so it reads back exactly as typed
+; instead of turning into a line break. DecodeNewlines reverses this.
 EncodeNewlines(text) {
-    return StrReplace(StrReplace(text, "`r`n", "`n"), "`n", "[NEWLINE]")
+    text := RegExReplace(text, "\[NEWLINE(\\*)\]", "[NEWLINE$1\]")
+    text := StrReplace(text, "`r`n", "`n")
+    text := StrReplace(text, "`r", "`n")
+    return StrReplace(text, "`n", "[NEWLINE]")
+}
+
+DecodeNewlines(text) {
+    out := ""
+    pos := 1
+    while (found := RegExMatch(text, "\[NEWLINE(\\*)\]", &m, pos)) {
+        out .= SubStr(text, pos, found - pos)
+        out .= (StrLen(m[1]) = 0) ? "`n" : "[NEWLINE" . SubStr(m[1], 2) . "]"
+        pos := found + m.Len
+    }
+    return out . SubStr(text, pos)
 }
 
 CheckShortcutConflict(shortcut, existingMap) {
@@ -526,11 +647,12 @@ CheckGlobalConflict(shortcut) {
     return answer = "Yes"
 }
 
+; Saves one shortcut. Returns true once the shortcut itself is on disk
+; (callers keep their input window open until then). Notices show only
+; the shortcut name - never the expansion text, which may be private.
 SaveEntry(filePath, shortcut, target, reloadFn, successTitle, successMsg) {
     global config, loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath
     try {
-        if (config["TextExpander"]["BackupOnSave"])
-            BackupFile(filePath)
         ; True overwrite: if shortcut exists, rewrite file instead of appending
         ownerMap    := ""
         ownerHeader := ""
@@ -543,25 +665,44 @@ SaveEntry(filePath, shortcut, target, reloadFn, successTitle, successMsg) {
         }
         if (ownerMap != "" && ownerMap.Has(shortcut)) {
             ownerMap[shortcut] := target
-            RewriteFile(filePath, ownerMap, ownerHeader)
+            ok := RewriteFile(filePath, ownerMap, ownerHeader)    ; backs up first
         } else {
-            LockedFileAppend(filePath, shortcut . " " . EncodeNewlines(target) . "`n")
+            ok := LockedFileAppend(filePath, shortcut . " " . EncodeNewlines(target) . "`n",
+                                   config["TextExpander"]["BackupOnSave"])
+        }
+        if (!ok) {
+            reloadFn.Call()      ; put memory back in step with the file on disk
+            return false
         }
         ; "Overwrite it everywhere": if the same trigger also exists in the
         ; other file, remove it there so two hotstrings don't fight over it.
+        otherOk   := true
+        otherKind := ""
         if (filePath = launcherPath && loadedExpansions.Has(shortcut)) {
             loadedExpansions.Delete(shortcut)
-            RewriteFile(textExpansionPath, loadedExpansions,
-                        "; Text Expansion file - Format: shortcut expansion")
-            LoadTextExpansions()
+            otherOk   := RewriteFile(textExpansionPath, loadedExpansions,
+                                     "; Text Expansion file - Format: shortcut expansion")
+            otherKind := "text expansion"
+            LoadTextExpansions()        ; memory matches the disk either way
         } else if (filePath = textExpansionPath && loadedLaunchers.Has(shortcut)) {
             loadedLaunchers.Delete(shortcut)
-            RewriteFile(launcherPath, loadedLaunchers,
-                        "; Launcher file - Format: shortcut target")
+            otherOk   := RewriteFile(launcherPath, loadedLaunchers,
+                                     "; Launcher file - Format: shortcut target")
+            otherKind := "launcher"
             LoadLaunchers()
         }
         reloadFn.Call()
-        TrayTip(successTitle, successMsg, "Iconi")
+        if (!otherOk) {
+            PlayFeedback("ErrorSound")
+            MsgBox("'" . shortcut . "' was saved, but the old " . otherKind .
+                   " with the same name could not be removed, so both are still there " .
+                   "and may clash.`n`nOpen Edit Shortcuts (" .
+                   HotkeyLabel(config["Hotkeys"]["ShowEditGUI"]) .
+                   ") and delete the one you don't want.",
+                   "Saved - One Problem", "Icon!")
+            return true          ; the new shortcut itself is safely on disk
+        }
+        SavedNotice(successTitle, successMsg)
         return true
     } catch Error as err {
         MsgBox("Failed to save: " . err.Message, "Error", "Icon!")
@@ -569,78 +710,121 @@ SaveEntry(filePath, shortcut, target, reloadFn, successTitle, successMsg) {
     }
 }
 
-RewriteFile(filePath, dataMap, headerComment) {
+; instSet = which names keep the $$ instant-fire marker (default: the
+; loaded expansions); passed when writing a map that isn't loaded yet
+RewriteFile(filePath, dataMap, headerComment, instSet := "") {
     global config, textExpansionPath, instantExpansions
+    if (!IsObject(instSet))
+        instSet := instantExpansions
+    content := headerComment . "`n"
+    for shortcut, target in dataMap {
+        key := shortcut
+        ; Keep the $$ instant-fire marker on expansions that had it
+        if (filePath = textExpansionPath && instSet.Has(shortcut))
+            key .= "$$"
+        content .= key . " " . EncodeNewlines(target) . "`n"
+    }
+    err := ReplaceFileSafely(filePath, content, config["TextExpander"]["BackupOnSave"] ? 1 : 0)
+    if (err != "") {
+        MsgBox("Could not save:`n" . filePath . "`n`n" . err, "Save Failed", "Icon!")
+        return false
+    }
+    return true
+}
+
+; Success notice for a save - with a warning added if the automatic
+; backup failed, so a missing backup is never hidden behind "saved"
+SavedNotice(title, msg) {
+    global backupFailedFile, backupDir
+    if (backupFailedFile = "") {
+        TrayTip(title, msg, "Iconi")
+        return
+    }
+    TrayTip(title, msg . "`nBut the automatic backup of " . backupFailedFile .
+            " failed - check the backups folder.", "Icon!")
+    backupFailedFile := ""
+}
+
+; The one way this script changes a data file - additions, edits,
+; deletes and migrations alike: takes the lock, writes a temp file, swaps
+; it in with a single Windows call, and keeps a .bak copy until the swap
+; has worked. The live file is never written to directly.
+;   newContent - the new text, or a function that is given the file's
+;                current text (read inside the lock) and returns the new text
+;   backup     - 0 = none; 1 = dated copy in the backups folder first, and
+;                if that fails save anyway but flag it (SavedNotice);
+;                2 = dated copy required - don't change the file without it
+; Returns "" on success (or when nothing needed changing), otherwise the
+; reason it failed. On failure the original file is left as it was.
+ReplaceFileSafely(filePath, newContent, backup := 0) {
+    global backupFailedFile
     lockPath := filePath . ".lock"
     tempPath := filePath . ".tmp"
     backPath := filePath . ".bak"
-    ; Never write while another save holds the lock (and never delete
-    ; someone else's lock)
-    if (!AcquireLock(lockPath)) {
-        MsgBox("Could not save - the file is locked:`n" . filePath .
-               "`n`nIf this keeps happening, delete the file:`n" . lockPath,
-               "Save Failed", "Icon!")
-        return false
-    }
+    lock := AcquireLock(lockPath)
+    if (!lock)
+        return "Another save is still using this file (or another copy of MultiShortcuts " .
+               "is busy with it).`nWait a moment and try again."
     try {
-        if (config["TextExpander"]["BackupOnSave"])
-            BackupFile(filePath)
-        content := headerComment . "`n"
-        for shortcut, target in dataMap {
-            key := shortcut
-            ; Keep the $$ instant-fire marker on expansions that had it
-            if (filePath = textExpansionPath && instantExpansions.Has(shortcut))
-                key .= "$$"
-            content .= key . " " . EncodeNewlines(target) . "`n"
+        if (IsObject(newContent)) {
+            old := FileExist(filePath) ? FileRead(filePath, "UTF-8") : ""
+            newContent := newContent.Call(old)
+            if (newContent == old)
+                return ""                 ; nothing to change
         }
-        try {
-            ; Write to temp first
-            if (FileExist(tempPath))
-                FileDelete(tempPath)
-            FileAppend(content, tempPath, "UTF-8")
-            ; Keep backup of original in case the replace fails
-            if (FileExist(filePath))
-                FileCopy(filePath, backPath, 1)
-            ; Atomic OS-level file replacement - safe against power loss/crash
-            if (!DllCall("ReplaceFile",
-                    "Str", filePath, "Str", tempPath, "Ptr", 0,
-                    "UInt", 1, "Ptr", 0, "Ptr", 0)) {
-                ; Fallback if ReplaceFile fails (e.g. file doesn't exist yet)
-                FileCopy(tempPath, filePath, 1)
-            }
-            try FileDelete(tempPath)
-            try FileDelete(backPath)
-        } finally {
-            try FileDelete(lockPath)
+        if (backup && FileExist(filePath) && !BackupFile(filePath)) {
+            if (backup = 2)
+                throw Error("The backup copy could not be made, so the file was not changed.")
+            SplitPath(filePath, &bName)
+            backupFailedFile := bName
         }
+        if (FileExist(tempPath))
+            FileDelete(tempPath)
+        FileAppend(newContent, tempPath, "UTF-8")
+        ; Keep a copy of the original in case the replace fails
+        if (FileExist(filePath))
+            FileCopy(filePath, backPath, 1)
+        ; Atomic OS-level file replacement - safe against power loss/crash
+        if (!DllCall("ReplaceFile",
+                "Str", filePath, "Str", tempPath, "Ptr", 0,
+                "UInt", 1, "Ptr", 0, "Ptr", 0)) {
+            ; Fallback (e.g. the file doesn't exist yet). A move on the same
+            ; drive is all-or-nothing too, unlike copying over the file.
+            if (!DllCall("MoveFileEx", "Str", tempPath, "Str", filePath, "UInt", 0x9))
+                throw Error("Windows could not replace the file (error " . A_LastError . ")")
+        }
+        try FileDelete(backPath)
         MarkOwnWrite()
-        return true
+        return ""
     } catch Error as err {
-        try FileDelete(lockPath)
         try FileDelete(tempPath)
-        ; Restore from backup if available
+        ; Restore from the copy if the file went missing
         if (FileExist(backPath) && !FileExist(filePath))
             try FileCopy(backPath, filePath, 1)
-        try FileDelete(backPath)
-        MsgBox("Failed to rewrite file: " . err.Message, "Error", "Icon!")
-        return false
+        msg := err.Message
+        if (FileExist(backPath))
+            msg .= "`n`nA copy of the file from before this save is kept here:`n" . backPath
+        return msg
+    } finally {
+        ReleaseLock(lock)
     }
 }
 
-LockedFileAppend(filePath, content) {
-    lockPath := filePath . ".lock"
-    if (!AcquireLock(lockPath)) {
-        MsgBox("Could not save - the file is locked:`n" . filePath .
-               "`n`nIf this keeps happening, delete the file:`n" . lockPath,
-               "Save Failed", "Icon!")
+; Adds entries to the end of a data file. Goes through ReplaceFileSafely
+; like every other change: the current file is read inside the lock, the
+; new lines are added in memory, and the whole file is swapped in at once
+; - so a failed save can never leave half a line in the live file.
+LockedFileAppend(filePath, content, backup := 0) {
+    addLines(old) {
+        if (old != "" && SubStr(old, -1) != "`n")
+            old .= "`n"                     ; never join onto a last line
+        return old . content
+    }
+    err := ReplaceFileSafely(filePath, addLines, backup)
+    if (err != "") {
+        MsgBox("Could not save to:`n" . filePath . "`n`n" . err, "Save Failed", "Icon!")
         return false
     }
-    try {
-        FileAppend(content, filePath, "UTF-8")
-    } finally {
-        try FileDelete(lockPath)
-    }
-    MarkOwnWrite()
     return true
 }
 
@@ -660,19 +844,25 @@ PromptShortcut(prompt, title) {
 ;------------------------------------------------
 ; AUTO-BACKUP
 ;------------------------------------------------
+; Returns true only if a complete copy was written to the backups folder
 BackupFile(filePath) {
     global backupDir
     if (!FileExist(filePath))
-        return
+        return false
     try {
+        if (!DirExist(backupDir))
+            DirCreate(backupDir)
         SplitPath(filePath, &fName)
-        timestamp := FormatTime(, "yyyyMMdd_HHmmss")
+        timestamp := FormatTime(, "yyyyMMdd_HHmmss") . "_" . A_MSec
         destPath  := backupDir . "\" . fName . "." . timestamp . ".bak"
-        FileCopy(filePath, destPath)
-        PruneBackups(fName)
+        FileCopy(filePath, destPath, 1)
+        if (!FileExist(destPath) || FileGetSize(destPath) != FileGetSize(filePath))
+            return false
     } catch {
-        ; Silent
+        return false
     }
+    try PruneBackups(fName)
+    return true
 }
 
 PruneBackups(baseName) {
@@ -733,7 +923,7 @@ AddNewLauncher() {
     if (!IsAllowedTarget(selectedFile))
         return
     SaveEntry(launcherPath, shortcut, selectedFile, LoadLaunchers,
-              "App Launcher Added", shortcut . " -> " . selectedFile)
+              "App Launcher Added", "'" . shortcut . "' saved")
 }
 
 AddDocumentLauncher() {
@@ -752,7 +942,7 @@ AddDocumentLauncher() {
     if (!IsAllowedTarget(selectedFile))
         return
     SaveEntry(launcherPath, shortcut, selectedFile, LoadLaunchers,
-              "Document Launcher Added", shortcut . " -> " . selectedFile)
+              "Document Launcher Added", "'" . shortcut . "' saved")
 }
 
 ;----------------------------------------------
@@ -791,10 +981,11 @@ SplitTarget(t, &path, &args) {
     }
 }
 
-; Returns true if a launcher target is safe to save (action = "add") or
-; to run (action = "launch"). Launchers are checked again every time they
-; fire, so a target written into launchers.ahk by anything other than this
-; script (a sync conflict, another program, a hand edit) is still checked.
+; Returns true if a launcher target is safe to save (action = "add"),
+; to import from a CSV file (action = "import") or to run (action =
+; "launch"). Launchers are checked again every time they fire, so a target
+; written into launchers.ahk by anything other than this script (a sync
+; conflict, another program, a hand edit) is still checked.
 IsAllowedTarget(target, action := "add", depth := 0) {
     global config
     raw     := Trim(target)
@@ -827,6 +1018,20 @@ IsAllowedTarget(target, action := "add", depth := 0) {
                 return false
             }
         }
+        if (action != "launch") {
+            known := false
+            for , proto in config["Security"]["KnownProtocols"] {
+                if (pm[1] = proto) {
+                    known := true
+                    break
+                }
+            }
+            if (!known && MsgBox("This launcher uses a '" . pm[1] . ":' link, which hands the " .
+                       "address to another program on your PC.`n`n" . raw . "`n`n" .
+                       "Only add it if you trust where it came from. Add it?",
+                       "Unfamiliar Link Type", "YesNo Icon!") != "Yes")
+                return false
+        }
         return true
     }
 
@@ -841,6 +1046,14 @@ IsAllowedTarget(target, action := "add", depth := 0) {
                "Security Block", "Icon!")
         return false
     }
+
+    ; Arguments change what a program does, so show them before adding
+    ; (an import or a hand-typed target; the file picker never adds any)
+    if (args != "" && action != "launch"
+        && MsgBox("This launcher runs:`n   " . path . "`nwith these extra instructions:`n   " . args .
+                  "`n`nOnly add it if you trust where it came from. Add it?",
+                  "Launcher With Extra Instructions", "YesNo Icon!") != "Yes")
+        return false
 
     if (DirExist(path))
         return true    ; folders open in File Explorer
@@ -863,13 +1076,44 @@ IsAllowedTarget(target, action := "add", depth := 0) {
     }
 
     ; A .lnk can point anywhere - check what it actually opens
-    if (ext = "lnk" && depth < 2) {
-        lnkTarget := ""
-        try FileGetShortcut(path, &lnkTarget)
-        ; If Windows can't read the .lnk (deleted, or an advertised Start
-        ; menu shortcut), FileGetShortcut leaves lnkTarget unset - carry on
-        ; instead of crashing. A missing file is reported at launch.
-        if (IsSet(lnkTarget) && lnkTarget != "" && StrLower(lnkTarget) != StrLower(path))
+    if (ext = "lnk" && depth >= 2) {
+        MsgBox("This shortcut points to another shortcut, which points to another.`n" .
+               "Point the launcher at the program itself instead.`n`n" . raw,
+               "Security Block", "Icon!")
+        return false
+    }
+    if (ext = "lnk") {
+        ; A deleted .lnk at launch: let LaunchTarget report it as missing
+        if (action = "launch" && InStr(path, "\") && !FileExist(path))
+            return true
+        lnkTarget := "", lnkArgs := ""
+        try FileGetShortcut(path, &lnkTarget, , &lnkArgs)
+        if (lnkTarget = "") {
+            ; Windows can't say what it opens (some installers make Start menu
+            ; shortcuts like this), so it can't be checked: refused. The
+            ; advanced setting allows one after a warning, but never for an
+            ; import - a file from elsewhere is exactly where this matters.
+            if (!config["Security"]["AllowUncheckedShortcuts"] || action = "import") {
+                MsgBox("Windows can't tell what this shortcut opens, so it can't be checked " .
+                       "and is not permitted.`n`n" . raw .
+                       "`n`nPoint the launcher at the program (.exe) itself instead.",
+                       "Security Block", "Icon!")
+                return false
+            }
+            if (action != "launch"
+                && MsgBox("Windows can't tell what this shortcut opens, so it can't be checked.`n`n" .
+                          raw . "`n`nOnly add it if you made it yourself or trust where it came from. " .
+                          "Add it anyway?", "Unchecked Shortcut", "YesNo Icon!") != "Yes")
+                return false
+            return true
+        }
+        ; A shortcut can carry hidden extra instructions - show them
+        if (lnkArgs != "" && action != "launch"
+            && MsgBox("This shortcut runs:`n   " . lnkTarget . "`nwith these extra instructions:`n   " .
+                      lnkArgs . "`n`nOnly add it if you trust where it came from. Add it?",
+                      "Shortcut With Extra Instructions", "YesNo Icon!") != "Yes")
+            return false
+        if (StrLower(lnkTarget) != StrLower(path))
             return IsAllowedTarget(lnkTarget, action, depth + 1)
         return true
     }
@@ -942,7 +1186,7 @@ AddWebLauncher() {
     if (!IsAllowedTarget(target))
         return
     SaveEntry(launcherPath, shortcut, target, LoadLaunchers,
-              "Web Launcher Added", shortcut . " -> " . target)
+              "Web Launcher Added", "'" . shortcut . "' saved")
 }
 
 AddNewExpansion() {
@@ -978,10 +1222,10 @@ AddNewExpansion() {
         .OnEvent("Click", (*) => InsertIntoEdit(editVal, "{time}"))
     gExp.Add("Button", "x340 y304 w130 h24", "Time h:mm AM/PM")
         .OnEvent("Click", (*) => InsertIntoEdit(editVal, "{time:h:mm tt}"))
-    gExp.Add("Button", "x10 y338 w110 h28", "&Save")
-        .OnEvent("Click", DoSave)
+    saveBtn := gExp.Add("Button", "x10 y338 w110 h28", "&Save")
+    saveBtn.OnEvent("Click", DoSave)
     gExp.Add("Button", "x128 y338 w110 h28", "&Preview")
-        .OnEvent("Click", (*) => MsgBox(ResolvePlaceholders(editVal.Value),
+        .OnEvent("Click", (*) => MsgBox(UnshieldBraces(ResolvePlaceholders(editVal.Value)),
                                         "Preview", "Iconi"))
     gExp.Add("Button", "x246 y338 w110 h28", "Cancel")
         .OnEvent("Click", (*) => gExp.Destroy())
@@ -994,9 +1238,19 @@ AddNewExpansion() {
             MsgBox("Expansion text cannot be empty.", "Validation", "Icon!")
             return
         }
-        gExp.Destroy()
-        SaveEntry(textExpansionPath, shortcut, expansion, LoadTextExpansions,
-                  "Expansion Added", shortcut . " -> " . SubStr(expansion, 1, 40))
+        ; Keep the window open until the save has worked, so a failed save
+        ; (file locked, disk full) never loses what was typed
+        gExp.Opt("+OwnDialogs")
+        saveBtn.Enabled := false
+        ; The notice names the shortcut only - expansion text may be private
+        ok := SaveEntry(textExpansionPath, shortcut, expansion, LoadTextExpansions,
+                        "Expansion Added", "'" . shortcut . "' saved")
+        if (ok) {
+            gExp.Destroy()
+            return
+        }
+        saveBtn.Enabled := true
+        editVal.Focus()
     }
 }
 
@@ -1004,19 +1258,53 @@ AddNewExpansion() {
 ; CAPTURE SELECTED TEXT AS EXPANSION
 ;------------------------------------------------
 CaptureSelectedText() {
-    global textExpansionPath, loadedExpansions
+    global textExpansionPath, loadedExpansions, allowCapture, privateTyping, prefsPath
 
+    ; Capture has to ask the other app to Copy (Ctrl+C). That app puts the
+    ; text on the normal clipboard WITHOUT the privacy markers this script
+    ; uses for its own pastes, so Windows clipboard history (Win+V), cloud
+    ; clipboard sync or a clipboard manager may keep a copy - even though
+    ; the old clipboard is put back afterwards. This script can't prevent
+    ; that, so it says so: it can be turned off in the tray menu, and with
+    ; "Type expansions directly" on (clinical use) it asks every time.
+    if (!allowCapture) {
+        MsgBox("Alt+C capture is turned off (tray menu).`n`n" .
+               "Use Alt+T and type or paste the text instead.", "Capture Off", "Iconi")
+        return
+    }
+    warned := ""
+    try warned := IniRead(prefsPath, "Privacy", "CaptureWarned", "0")
+    if (privateTyping || warned != "1") {
+        msg := "Alt+C copies your selection with the other app's normal Copy.`n`n"
+        msg .= "Windows clipboard history (Win+V), cloud clipboard and clipboard "
+        msg .= "managers may keep a copy of it.`n`n"
+        msg .= "Don't use Alt+C for patient details or other private text - "
+        msg .= "use Alt+T and type it instead.`n`nCapture the selection now?"
+        if (MsgBox(msg, "Capture Uses the Clipboard", "YesNo Icon! Default2") != "Yes")
+            return
+        try IniWrite("1", prefsPath, "Privacy", "CaptureWarned")
+    }
+
+    ; The old clipboard is put back only if nothing has changed the
+    ; clipboard since the last step this script controls (Windows counts
+    ; every change: GetClipboardSequenceNumber) - so something copied in
+    ; the meantime is never overwritten
     clipSaved := ClipboardAll()
     A_Clipboard := ""
+    seqCleared := DllCall("GetClipboardSequenceNumber", "UInt")
     Send("^c")
     if (!ClipWait(config["Performance"]["ClipWaitTimeout"])) {
-        A_Clipboard := clipSaved
+        if (DllCall("GetClipboardSequenceNumber", "UInt") = seqCleared)
+            A_Clipboard := clipSaved
         MsgBox("No text was selected.`n`nHighlight some text first, then press Alt+C.",
                "Nothing Selected", "Iconi")
         return
     }
     selectedText := A_Clipboard
-    A_Clipboard := clipSaved
+    seqCopied := DllCall("GetClipboardSequenceNumber", "UInt")
+    Sleep(50)                ; let the other app finish its Copy
+    if (DllCall("GetClipboardSequenceNumber", "UInt") = seqCopied)
+        A_Clipboard := clipSaved
 
     if (Trim(selectedText) = "") {
         MsgBox("No text was selected.`n`nHighlight some text first, then press Alt+C.",
@@ -1035,14 +1323,15 @@ CaptureSelectedText() {
     previewCtrl.SetFont("s9", "Consolas")
     gCap.Add("Text", "x10 y120 w440", "Enter a shortcut trigger for this text:")
     scEdit := gCap.Add("Edit", "x10 y142 w440 h24")
-    gCap.Add("Button", "x10 y178 w120 h28", "Save")
-        .OnEvent("Click", DoCaptureSave)
+    saveBtn := gCap.Add("Button", "x10 y178 w120 h28", "Save")
+    saveBtn.OnEvent("Click", DoCaptureSave)
     gCap.Add("Button", "x138 y178 w120 h28", "Cancel")
         .OnEvent("Click", (*) => gCap.Destroy())
     gCap.Show("w460 h218")
     scEdit.Focus()
 
     DoCaptureSave(*) {
+        gCap.Opt("+OwnDialogs")
         shortcut := Trim(scEdit.Value)
         if (shortcut = "") {
             MsgBox("Please enter a shortcut name.", "Required", "Icon!")
@@ -1055,11 +1344,17 @@ CaptureSelectedText() {
         }
         if (!CheckGlobalConflict(shortcut))
             return
-        gCap.Destroy()                          ; close window immediately
-        sc  := shortcut
-        txt := selectedText
-        SetTimer(() => SaveEntry(textExpansionPath, sc, txt, LoadTextExpansions,
-                  "Expansion Captured", sc . " -> " . SubStr(txt, 1, 40)), -1)
+        ; Keep the window (and the captured text) until the save has worked,
+        ; so a failed save can simply be tried again
+        saveBtn.Enabled := false
+        ; The notice names the shortcut only - captured text may be private
+        if (SaveEntry(textExpansionPath, shortcut, selectedText, LoadTextExpansions,
+                      "Expansion Captured", "'" . shortcut . "' saved")) {
+            gCap.Destroy()
+            return
+        }
+        saveBtn.Enabled := true
+        scEdit.Focus()
     }
 }
 
@@ -1068,22 +1363,34 @@ CaptureSelectedText() {
 ;------------------------------------------------
 ImmediateBackup() {
     global launcherPath, textExpansionPath
-    try {
-        BackupFile(launcherPath)
-        BackupFile(textExpansionPath)
-        PlayFeedback("BackupSound")
-        TrayTip("Backup Complete", "Both files backed up to \backups\ folder", "Iconi")
-    } catch Error as err {
-        PlayFeedback("ErrorSound")
-        MsgBox("Backup failed: " . err.Message, "Error", "Icon!")
+    failed := []
+    for , p in [launcherPath, textExpansionPath] {
+        if (!BackupFile(p)) {
+            SplitPath(p, &name)
+            failed.Push(name)
+        }
     }
+    if (failed.Length = 0) {
+        PlayFeedback("BackupSound")
+        TrayTip("Backup Complete", "Both files backed up to the \backups\ folder", "Iconi")
+        return
+    }
+    PlayFeedback("ErrorSound")
+    msg := "Backup failed for:`n"
+    for , name in failed
+        msg .= "   " . name . "`n"
+    if (failed.Length = 1)
+        msg .= "`nThe other file was backed up."
+    msg .= "`n`nCheck that this folder exists, isn't full and can be written to:`n" . backupDir
+    MsgBox(msg, "Backup Failed", "Icon!")
 }
 
 ;------------------------------------------------
 ; QUICK TEXT EXPANSION
 ;------------------------------------------------
 QuickTextExpansion() {
-    global loadedExpansions
+    global loadedExpansions, hidePreviews
+    prevWin := WinExist("A")      ; where the text should go
     if (loadedExpansions.Count = 0) {
         MsgBox("No text expansions defined yet.`n`nUse Alt+T to add one.",
                "No Expansions", "Iconi")
@@ -1091,6 +1398,10 @@ QuickTextExpansion() {
     }
     items := []
     for shortcut, expansion in loadedExpansions {
+        if (hidePreviews) {                 ; names only - nothing private on screen
+            items.Push(shortcut)
+            continue
+        }
         previewText := StrReplace(StrReplace(expansion, "`r`n", " <- "), "`n", " <- ")
         preview := StrLen(previewText) > 60
                    ? SubStr(previewText, 1, 57) . "..."
@@ -1120,7 +1431,18 @@ QuickTextExpansion() {
         sc := Trim(StrSplit(rowText, "  ->  ")[1])
         if (loadedExpansions.Has(sc)) {
             gPick.Destroy()
-            Sleep(80)
+            ; Go back to the window that was active before the picker, and
+            ; don't type if that fails (private text, wrong window)
+            if (!prevWin || !WinExist("ahk_id " . prevWin)) {
+                TrayTip("Not Pasted", "The window you were typing in is gone.", "Icon!")
+                return
+            }
+            try WinActivate("ahk_id " . prevWin)
+            if (!WinWaitActive("ahk_id " . prevWin, , 1)) {
+                TrayTip("Not Pasted", "Couldn't switch back to the window you were typing in.", "Icon!")
+                return
+            }
+            Sleep(50)
             expansion := loadedExpansions[sc]
             RecordExpansionHistory(sc, sc, StrLen(expansion))
             SendText(expansion)
@@ -1208,14 +1530,19 @@ SaveExpansionHistory() {
             len := entry.Has("length") ? entry["length"] : 0
             content .= sc . "|" . len . "|" . entry["time"] . "`n"
         }
-        if (FileExist(historyPath))
-            FileDelete(historyPath)
-        if (content != "")
-            FileAppend(content, historyPath)
-    } catch Error as err {
-        if (InStr(err.Message, "disk") || InStr(err.Message, "space") ||
-            InStr(err.Message, "denied") || InStr(err.Message, "permission"))
-            TrayTip("Save Warning", "Could not save history: " . err.Message, "Icon!")
+        SaveSideFile(historyPath, content, "undo history")
+    }
+}
+
+; Saves the history / statistics files the same safe way as the shortcut
+; files (temp file + atomic swap), so a failed save can't erase them. A
+; failure is mentioned once per session rather than on every expansion.
+SaveSideFile(path, content, what) {
+    static warned := Map()
+    err := ReplaceFileSafely(path, content, 0)
+    if (err != "" && !warned.Has(path)) {
+        warned[path] := true
+        TrayTip("Save Warning", "Could not save the " . what . ".`n" . SubStr(err, 1, 150), "Icon!")
     }
 }
 
@@ -1256,15 +1583,7 @@ SaveUsageStats() {
         content := ""
         for key, data in usageStats
             content .= key . "|" . data["count"] . "|" . data["lastUsed"] . "`n"
-        if (FileExist(statsPath))
-            FileDelete(statsPath)
-        if (content != "")
-            FileAppend(content, statsPath)
-    } catch Error as err {
-        ; Fix 9: surface disk-full or permission errors
-        if (InStr(err.Message, "disk") || InStr(err.Message, "space") ||
-            InStr(err.Message, "denied") || InStr(err.Message, "permission"))
-            TrayTip("Save Warning", "Could not save stats: " . err.Message, "Icon!")
+        SaveSideFile(statsPath, content, "usage statistics")
     }
 }
 
@@ -1279,11 +1598,12 @@ LoadUsageStats() {
             line := Trim(line)
             if (line = "")
                 continue
-            parts := StrSplit(line, "|", , 3)
-            if (parts.Length >= 3)
-                usageStats[parts[1]] := Map(
-                    "count",    Integer(parts[2]),
-                    "lastUsed", parts[3])
+            ; Each line: type|shortcut|count|lastUsed
+            parts := StrSplit(line, "|", , 4)
+            if (parts.Length >= 4 && IsInteger(parts[3]))
+                usageStats[parts[1] . "|" . parts[2]] := Map(
+                    "count",    Integer(parts[3]),
+                    "lastUsed", parts[4])
         }
     } catch Error as err {
         ; Silent
@@ -1369,9 +1689,10 @@ ExportStats(rows) {
             content .= EscapeCSV(row[2]) . "," . EscapeCSV(row[3]) . ","
                      . row[1] . "," . EscapeCSV(lastUsed) . "`n"
         }
-        if (FileExist(savePath))
-            FileDelete(savePath)
-        FileAppend(content, savePath)
+        ; temp file + atomic swap: an existing export is never lost
+        err := ReplaceFileSafely(savePath, content, 0)
+        if (err != "")
+            throw Error(err)
         TrayTip("Stats Exported", "Saved to " . savePath, "Iconi")
     } catch Error as err {
         MsgBox("Export failed: " . err.Message, "Error", "Icon!")
@@ -1382,7 +1703,7 @@ ExportStats(rows) {
 ; EXPORT TO CSV
 ;------------------------------------------------
 ExportToCSV() {
-    global loadedLaunchers, loadedExpansions, exportPath
+    global loadedLaunchers, loadedExpansions, exportPath, instantExpansions
     savePath := FileSelect("S", exportPath, "Export Shortcuts to CSV",
                            "CSV Files (*.csv)")
     if (savePath = "")
@@ -1392,10 +1713,11 @@ ExportToCSV() {
         for sc, target in loadedLaunchers
             content .= "Launcher," . EscapeCSV(sc) . "," . EscapeCSV(target) . "`n"
         for sc, exp in loadedExpansions
-            content .= "Expansion," . EscapeCSV(sc) . "," . EscapeCSV(exp) . "`n"
-        if (FileExist(savePath))
-            FileDelete(savePath)
-        FileAppend(content, savePath)
+            content .= "Expansion," . EscapeCSV(sc . (instantExpansions.Has(sc) ? "$$" : "")) . "," . EscapeCSV(exp) . "`n"
+        ; temp file + atomic swap: an existing export is never lost
+        err := ReplaceFileSafely(savePath, content, 0)
+        if (err != "")
+            throw Error(err)
         MsgBox("Exported " . (loadedLaunchers.Count + loadedExpansions.Count) .
                " shortcuts to:`n" . savePath, "Export Complete", "Iconi")
     } catch Error as err {
@@ -1404,10 +1726,8 @@ ExportToCSV() {
 }
 
 EscapeCSV(val) {
-    ; Substitute newlines with token before CSV encoding
-    val := StrReplace(val, "`r`n", "[NEWLINE]")
-    val := StrReplace(val, "`n",   "[NEWLINE]")
-    val := StrReplace(val, "`r",   "[NEWLINE]")
+    ; Line breaks become [NEWLINE] (a literal "[NEWLINE]" is kept distinct)
+    val := EncodeNewlines(val)
     ; Prefix cells starting with formula characters to prevent Excel injection
     ; e.g. =cmd|, @SUM, +calc, -1+1+cmd|
     if (RegExMatch(val, "^[=@+\-]"))
@@ -1422,38 +1742,61 @@ EscapeCSV(val) {
 ;------------------------------------------------
 ; IMPORT FROM CSV
 ;------------------------------------------------
-; Splits one CSV line into fields, honouring "quoted, fields" and "" escapes
-ParseCSVLine(line) {
-    fields := []
-    field  := ""
-    inQ    := false
-    i      := 1
-    n      := StrLen(line)
+; Splits a whole CSV file into records (arrays of fields). A quoted field
+; may contain commas, "" and line breaks - the way Excel and other
+; programs write them - so one record can span several physical lines.
+; A quote only opens a quoted field at the start of a field (after any
+; spaces); anywhere else it is ordinary text. Returns "" if a quoted field
+; is never closed: a broken file must not swallow the rest of the file
+; into one shortcut.
+ParseCSVRecords(text) {
+    text    := StrReplace(StrReplace(text, "`r`n", "`n"), "`r", "`n")
+    records := []
+    fields  := []
+    field   := ""
+    inQ     := false
+    i       := 1
+    n       := StrLen(text)
     while (i <= n) {
-        ch := SubStr(line, i, 1)
+        ch := SubStr(text, i, 1)
         if (inQ) {
             if (ch = '"') {
-                if (SubStr(line, i + 1, 1) = '"') {
+                if (SubStr(text, i + 1, 1) = '"') {
                     field .= '"'
                     i += 2
                     continue
                 }
                 inQ := false
             } else {
-                field .= ch
+                field .= ch             ; includes line breaks inside quotes
             }
-        } else if (ch = '"') {
-            inQ := true
+        } else if (ch = '"' && Trim(field) = "") {
+            inQ   := true
+            field := ""
         } else if (ch = ",") {
             fields.Push(field)
             field := ""
+        } else if (ch = "`n") {
+            fields.Push(field)
+            records.Push(FinishCSVRecord(fields))
+            fields := []
+            field  := ""
         } else {
             field .= ch
         }
         i++
     }
-    fields.Push(field)
-    ; Hand-made files may leave commas in the last column unquoted
+    if (inQ)
+        return ""
+    if (field != "" || fields.Length) {
+        fields.Push(field)
+        records.Push(FinishCSVRecord(fields))
+    }
+    return records
+}
+
+; Hand-made files may leave commas in the last column unquoted
+FinishCSVRecord(fields) {
     while (fields.Length > 3) {
         last := fields.Pop()
         fields[fields.Length] .= "," . last
@@ -1461,13 +1804,16 @@ ParseCSVLine(line) {
     return fields
 }
 
+IsBlankCSVRecord(f) => (f.Length = 1 && Trim(f[1]) = "")
+IsCSVHeader(f)      => (f.Length >= 2 && Trim(f[1]) = "Type" && InStr(f[2], "Shortcut"))
+
 ; Reverses what EscapeCSV did on export
 UnescapeCSVValue(val) {
     ; Export prefixes ' to values starting with = @ + - (spreadsheet
     ; formula guard). Remove it so -= comes back as -= and not '-=.
     if (RegExMatch(val, "^'[=@+\-]"))
         val := SubStr(val, 2)
-    return StrReplace(val, "[NEWLINE]", "`n")
+    return DecodeNewlines(val)
 }
 
 ImportFromCSV() {
@@ -1485,59 +1831,72 @@ ImportFromCSV() {
         return
 
     try {
-        lines := StrSplit(FileRead(filePath, "UTF-8"), "`n", "`r")
+        records := ParseCSVRecords(FileRead(filePath, "UTF-8"))
     } catch Error as err {
         MsgBox("Could not read the file: " . err.Message, "Import Failed", "Icon!")
         return
     }
+    if (!IsObject(records)) {
+        MsgBox("This file has a quoted value that is never closed (a missing `" mark), " .
+               "so it can't be read safely. Nothing was imported.", "Import Failed", "Icon!")
+        return
+    }
 
-    ; ── Pre-scan: count expansions that send keystrokes or switch windows.
-    ; {key:...} sends raw keystrokes - an imported {key:#r} would open Run,
-    ; {key:^w} would close the active window, etc. Make the user aware.
-    riskyCount   := 0
-    riskySamples := []
-    for i, line in lines {
-        line := Trim(line)
-        if (line = "" || (i = 1 && InStr(line, "Type,Shortcut")))
+    ; ── Automation review. {key:...} presses keys, {focus:...} switches
+    ; windows and {wait:...} pauses - an imported {key:#r} would open Run,
+    ; {key:^w} would close the active window. Such shortcuts are NOT imported unless each one is
+    ; approved after seeing exactly what it does. Approval is per record, so
+    ; a later copy of the same name can't ride on an earlier approval.
+    risky := []      ; [record number, shortcut, actions, text]
+    for i, f in records {
+        if (IsBlankCSVRecord(f) || (i = 1 && IsCSVHeader(f)))
             continue
-        f := ParseCSVLine(line)
         if (f.Length < 3 || Trim(f[1]) != "Expansion")
             continue
         ; Shortcuts you already have are skipped on import (including the
         ; built-in ; and = families), so they aren't a risk - don't count them
-        sc := UnescapeCSVValue(Trim(f[2]))
+        sc  := RegExReplace(UnescapeCSVValue(Trim(f[2])), "\$\$$")
+        val := UnescapeCSVValue(f[3])
         if (loadedExpansions.Has(sc) || loadedLaunchers.Has(sc))
             continue
-        if (InStr(f[3], "{key:") || InStr(f[3], "{focus:")) {
-            riskyCount++
-            if (riskySamples.Length < 3)
-                riskySamples.Push(sc)
-        }
+        acts := AutomationTokens(val)
+        if (acts != "")
+            risky.Push([i, sc, acts, val])
     }
-    if (riskyCount > 0) {
-        sampleList := ""
-        for , smp in riskySamples
-            sampleList .= "  * " . smp . "`n"
-        if (riskyCount > riskySamples.Length)
-            sampleList .= "  * ...and " . (riskyCount - riskySamples.Length) . " more`n"
-        warn := riskyCount . " expansion(s) in this CSV send keystrokes or activate "
-        warn .= "windows via {key:} or {focus:} tokens.`n`n"
-        warn .= sampleList . "`n"
-        warn .= "These can perform actions like closing windows, opening dialogs, "
-        warn .= "or running Win+R. Only import if you trust the source.`n`n"
-        warn .= "Proceed with the import?"
-        if (MsgBox(warn, "Risky Tokens Detected", "YesNo Icon!") != "Yes")
+    approved := Map()          ; record number -> true
+    if (risky.Length > 0) {
+        warn := risky.Length . " shortcut(s) in this file press keys, switch windows "
+        warn .= "or pause ({key:}, {focus:} or {wait:}). These can close windows, open "
+        warn .= "dialogs or run Win+R when triggered.`n`n"
+        warn .= "Yes = show me each one, and I'll decide one by one`n"
+        warn .= "No = skip all of them (import only the plain-text shortcuts)`n"
+        warn .= "Cancel = stop the import"
+        choice := MsgBox(warn, "Shortcuts That Press Keys", "YesNoCancel Icon! Default2")
+        if (choice = "Cancel")
             return
+        if (choice = "Yes") {
+            for n, r in risky {
+                ans := ReviewImportedShortcut(n, risky.Length, r[2], r[3], r[4])
+                if (ans = "stop")
+                    break
+                if (ans = "import")
+                    approved[r[1]] := true
+            }
+        }
     }
 
     imported := 0
     skipped  := 0
-    seen     := Map()   ; avoid adding the same trigger twice from one file
-    for i, line in lines {
-        line := Trim(line)
-        if (line = "" || (i = 1 && InStr(line, "Type,Shortcut")))
+    dupes    := 0
+    autoSkip := 0
+    seen     := Map()   ; shortcuts already taken from this file (by real name)
+    addL     := ""      ; new launcher lines  } each file is saved once, at
+    addE     := ""      ; new expansion lines } the end, in one safe replace
+    nL       := 0
+    nE       := 0
+    for i, f in records {
+        if (IsBlankCSVRecord(f) || (i = 1 && IsCSVHeader(f)))
             continue
-        f := ParseCSVLine(line)
         if (f.Length < 3) {
             skipped++
             continue
@@ -1547,39 +1906,121 @@ ImportFromCSV() {
         val  := UnescapeCSVValue(f[3])
         if (type = "Launcher")
             val := Trim(val)
-        if (!IsValidShortcut(sc, false) || Trim(val) = "" || seen.Has(sc)) {
+        ; The name the shortcut really gets once loaded: the $$ instant-fire
+        ; marker is stripped, so "abc" and "abc$$" are the same shortcut
+        base := RegExReplace(sc, "\$\$$")
+        if (!IsValidShortcut(sc, false) || !IsValidShortcut(base, false) || Trim(val) = "") {
             skipped++
             continue
         }
-        if (loadedLaunchers.Has(sc) || loadedExpansions.Has(sc)) {
+        if (seen.Has(base)) {
+            dupes++      ; listed twice in this file - only the first is kept
+            continue
+        }
+        if (loadedLaunchers.Has(base) || loadedExpansions.Has(base)) {
             skipped++    ; never overwrite existing shortcuts on import
             continue
         }
         if (type = "Launcher") {
-            if (IsAllowedTarget(val)
-                && LockedFileAppend(launcherPath, sc . " " . EncodeNewlines(val) . "`n")) {
-                seen[sc] := true
-                imported++
+            if (IsAllowedTarget(val, "import")) {
+                addL .= sc . " " . EncodeNewlines(val) . "`n"
+                seen[base] := true
+                nL++
             } else {
                 skipped++
             }
         } else if (type = "Expansion") {
-            if (LockedFileAppend(textExpansionPath, sc . " " . EncodeNewlines(val) . "`n")) {
-                seen[sc] := true
-                imported++
-            } else {
-                skipped++
+            if (AutomationTokens(val) != "" && !approved.Has(i)) {
+                autoSkip++
+                continue
             }
+            addE .= sc . " " . EncodeNewlines(val) . "`n"
+            seen[base] := true
+            nE++
         } else {
             skipped++
         }
+    }
+    if (addL != "") {
+        if (LockedFileAppend(launcherPath, addL))
+            imported += nL
+        else
+            skipped += nL
+    }
+    if (addE != "") {
+        if (LockedFileAppend(textExpansionPath, addE))
+            imported += nE
+        else
+            skipped += nE
     }
     LoadLaunchers()
     LoadTextExpansions()
     MsgBox("Import complete.`n`nImported: " . imported .
            "`nSkipped: " . skipped .
+           (autoSkip > 0 ? "`nPress keys / switch windows / pause, not approved: " . autoSkip : "") .
+           (dupes > 0 ? "`nListed twice in the file (only the first kept): " . dupes : "") .
            (skipped > 0 ? "`n`n(Existing shortcuts are never overwritten by an import.)" : ""),
            "Import Results", "Iconi")
+}
+
+; Approval window for one imported shortcut. Shows EVERY action and the
+; COMPLETE text, in scrolling boxes, so nothing that will run is hidden
+; behind a cut-off. Skip is the default (Enter, Esc and closing the window
+; all skip). Returns "import", "skip" or "stop" (skip this and the rest).
+ReviewImportedShortcut(n, total, sc, acts, txt) {
+    res := {v: "skip"}
+    g := Gui("+AlwaysOnTop", "Review Imported Shortcut " . n . " of " . total)
+    g.SetFont("s10", "Segoe UI")
+    g.Add("Text", "x10 y10 w620", "Shortcut:   " . sc)
+    g.Add("Text", "x10 y36 w620",
+          "Every action it will take when typed (complete list - scroll to see all):")
+    ea := g.Add("Edit", "x10 y58 w620 h130 ReadOnly Multi VScroll",
+                StrReplace(RTrim(acts, "`n"), "`n", "`r`n"))
+    ea.SetFont("s9", "Consolas")
+    g.Add("Text", "x10 y198 w620",
+          "Complete text, nothing shortened (" . StrLen(txt) . " characters - scroll to see all):")
+    et := g.Add("Edit", "x10 y220 w620 h200 ReadOnly Multi VScroll",
+                StrReplace(StrReplace(txt, "`r`n", "`n"), "`n", "`r`n"))
+    et.SetFont("s9", "Consolas")
+    g.Add("Text", "x10 y428 w620 cGray",
+          "Only import it if you understand every action above and trust where the file came from.")
+    g.Add("Button", "x10 y454 w160 h30", "&Import this one")
+        .OnEvent("Click", (*) => (res.v := "import", g.Destroy()))
+    g.Add("Button", "x180 y454 w160 h30 Default", "&Skip it")
+        .OnEvent("Click", (*) => (res.v := "skip", g.Destroy()))
+    g.Add("Button", "x350 y454 w200 h30", "Skip this and &all the rest")
+        .OnEvent("Click", (*) => (res.v := "stop", g.Destroy()))
+    g.OnEvent("Close",  (*) => (res.v := "skip", g.Destroy()))
+    g.OnEvent("Escape", (*) => (res.v := "skip", g.Destroy()))
+    hwnd := g.Hwnd
+    g.Show("w640 h496")
+    WinWaitClose("ahk_id " . hwnd)
+    return res.v
+}
+
+; Lists the {key:...}, {focus:...} and {wait:...} actions in an expansion,
+; one per line ("" if there are none) - so an import can show exactly what
+; would run. Nothing is shortened. A pause longer than the cap is flagged.
+AutomationTokens(val) {
+    global config
+    out := ""
+    pos := 1
+    while (found := RegExMatch(val, "\{(key|focus|wait):((?:[^{}]|\{[^{}]*\})*)\}?", &m, pos)) {
+        tok := m[0]
+        if (m[1] = "focus") {
+            out .= "   switch to window: " . tok . "`n"
+        } else if (m[1] = "wait") {
+            ms   := Trim(m[2])
+            note := ""
+            if (IsInteger(ms) && Integer(ms) > config["Performance"]["MaxWaitMs"])
+                note := "   (TOO LONG - will be cut to " . (config["Performance"]["MaxWaitMs"] // 1000) . " s)"
+            out .= "   pause: " . tok . note . "`n"
+        } else {
+            out .= "   press keys: " . tok . "`n"
+        }
+        pos := found + Max(m.Len, 1)
+    }
+    return out
 }
 
 ;------------------------------------------------
@@ -1611,6 +2052,66 @@ LoadSoundPrefs() {
         if (saved != "unset") {
             config["Feedback"]["PlaySounds"] := (saved = "true")
         }
+    }
+}
+
+; Advanced setting, off unless prefs.ini has [Security] AllowUncheckedShortcuts=1
+LoadSecurityPrefs() {
+    global prefsPath, config, privateTyping, hidePreviews, allowCapture
+    if (!FileExist(prefsPath))
+        return
+    try config["Security"]["AllowUncheckedShortcuts"] :=
+        (IniRead(prefsPath, "Security", "AllowUncheckedShortcuts", "0") = "1")
+    try privateTyping := (IniRead(prefsPath, "Privacy", "TypeDirectly", "0") = "1")
+    try hidePreviews  := (IniRead(prefsPath, "Privacy", "HidePreviews", "0") = "1")
+    try allowCapture  := (IniRead(prefsPath, "Privacy", "AllowCapture", "1") = "1")
+}
+
+; Tray menu: turn Alt+C capture off - for clinical use, where selected
+; text may be patient information (see CaptureSelectedText)
+ToggleAllowCapture(*) {
+    global allowCapture, allowCaptureMenu, prefsPath
+    allowCapture := !allowCapture
+    try IniWrite(allowCapture ? "1" : "0", prefsPath, "Privacy", "AllowCapture")
+    if (allowCapture) {
+        A_TrayMenu.Check(allowCaptureMenu)
+        TrayTip("Alt+C Capture On", "Alt+C copies the selection with the clipboard.", "Iconi")
+    } else {
+        A_TrayMenu.Uncheck(allowCaptureMenu)
+        TrayTip("Alt+C Capture Off", "Use Alt+T and type or paste the text instead.", "Iconi")
+    }
+}
+
+; Tray menu: the Quick Expansion Picker and the editor list show shortcut
+; names only, so private text isn't on screen (e.g. while screen sharing)
+ToggleHidePreviews(*) {
+    global hidePreviews, hidePreviewsMenu, prefsPath
+    hidePreviews := !hidePreviews
+    try IniWrite(hidePreviews ? "1" : "0", prefsPath, "Privacy", "HidePreviews")
+    if (hidePreviews) {
+        A_TrayMenu.Check(hidePreviewsMenu)
+        TrayTip("Expansion Text Hidden",
+                "Lists now show shortcut names only.`nDouble-click a shortcut in Edit Shortcuts to see or edit its text.", "Iconi")
+    } else {
+        A_TrayMenu.Uncheck(hidePreviewsMenu)
+        TrayTip("Expansion Text Shown", "Lists show the start of each expansion again.", "Iconi")
+    }
+}
+
+; Tray menu: type every expansion key by key, never via the clipboard
+TogglePrivateTyping(*) {
+    global privateTyping, privateTypingMenu, prefsPath
+    privateTyping := !privateTyping
+    try IniWrite(privateTyping ? "1" : "0", prefsPath, "Privacy", "TypeDirectly")
+    if (privateTyping) {
+        A_TrayMenu.Check(privateTypingMenu)
+        TrayTip("Private Typing On",
+                "Expansions are typed directly and never put on the clipboard.`n" .
+                "Long expansions take a little longer to appear.", "Iconi")
+    } else {
+        A_TrayMenu.Uncheck(privateTypingMenu)
+        TrayTip("Private Typing Off",
+                "Expansions are pasted (faster), with clipboard-history protection.", "Iconi")
     }
 }
 
@@ -1653,11 +2154,31 @@ LoadTriggerPrefs() {
     }
 }
 
-SaveTriggerPrefs() {
-    global prefsPath, config
+; Returns false if prefs.ini couldn't be written (both or neither is kept)
+SaveTriggerPrefs(winCmd, appLaunch) {
+    global prefsPath
+    oldWin := "", oldApp := ""
+    try oldWin := IniRead(prefsPath, "Triggers", "WinCmd", "")
+    try oldApp := IniRead(prefsPath, "Triggers", "AppLaunch", "")
     try {
-        IniWrite(config["Triggers"]["WinCmd"],    prefsPath, "Triggers", "WinCmd")
-        IniWrite(config["Triggers"]["AppLaunch"], prefsPath, "Triggers", "AppLaunch")
+        IniWrite(winCmd,    prefsPath, "Triggers", "WinCmd")
+        IniWrite(appLaunch, prefsPath, "Triggers", "AppLaunch")
+        return true
+    } catch {
+        ; put back whatever was there before, so the two keys stay a pair
+        try {
+            if (oldWin != "")
+                IniWrite(oldWin, prefsPath, "Triggers", "WinCmd")
+            else
+                IniDelete(prefsPath, "Triggers", "WinCmd")
+        }
+        try {
+            if (oldApp != "")
+                IniWrite(oldApp, prefsPath, "Triggers", "AppLaunch")
+            else
+                IniDelete(prefsPath, "Triggers", "AppLaunch")
+        }
+        return false
     }
 }
 
@@ -1681,7 +2202,7 @@ SaveModePref(level) {
 }
 
 UnlockFullMode() {
-    global appMode
+    global appMode, prefsPath
     if (appMode = "full") {
         TrayTip("Already Unlocked",
                 "Full features are already active.", "Iconi")
@@ -1700,6 +2221,7 @@ UnlockFullMode() {
     if (MsgBox(msg, "Unlock Full Features", "YesNo Icon?") != "Yes")
         return
     SaveModePref("full")
+    try IniWrite("1", prefsPath, "Mode", "ShowQuickStart")   ; Quick Start after the reload
     TrayTip("Unlocking Full Mode",
             "Reloading MultiShortcuts...", "Iconi")
     SetTimer(ReloadScriptSilent, -600)
@@ -1785,13 +2307,15 @@ ShowTriggerSetup() {
             return
         }
 
-        ; Migrate existing shortcuts that use the old prefixes
-        migrated := MigrateTriggerPrefix(curWinCmd, newWin)
-                  + MigrateTriggerPrefix(curAppLaunch, newApp)
-
-        config["Triggers"]["WinCmd"]    := newWin
-        config["Triggers"]["AppLaunch"] := newApp
-        SaveTriggerPrefs()
+        ; Move existing family shortcuts to the new prefixes. Everything is
+        ; worked out first; the files are written, then the setting - and if
+        ; any step fails, what was already written is put back, so the
+        ; files, the setting and memory never disagree. (Memory itself is
+        ; only refreshed by the reload at the end.)
+        g.Opt("+OwnDialogs")
+        migrated := ApplyTriggerChange(curWinCmd, newWin, curAppLaunch, newApp)
+        if (migrated < 0)
+            return               ; already explained - window stays open
 
         ; Re-seed defaults under the new prefixes (won't overwrite anything that exists)
         SeedDefaultExpansions()
@@ -1807,59 +2331,141 @@ ShowTriggerSetup() {
     }
 }
 
-; Rewrites the appropriate data file to replace oldPrefix with newPrefix on
-; built-in family shortcuts. Returns count of shortcuts migrated.
-;
-; A shortcut is considered a "family member" if it starts with the old prefix
-; AND the rest is a single letter, digit, or symbol (everything the seeder uses).
-; We migrate from text_expansion.ahk for ; family and launchers.ahk for ` family.
-MigrateTriggerPrefix(oldPrefix, newPrefix) {
-    global loadedExpansions, loadedLaunchers
-    global textExpansionPath, launcherPath
-    if (oldPrefix = newPrefix || oldPrefix = "" || newPrefix = "")
-        return 0
-    total := 0
-    total += MigratePrefixIn(loadedExpansions, textExpansionPath, oldPrefix, newPrefix,
-                              "; Text Expansion file - Format: shortcut expansion")
-    total += MigratePrefixIn(loadedLaunchers, launcherPath, oldPrefix, newPrefix,
-                              "; Launcher file - Format: shortcut target")
-    return total
+;------------------------------------------------
+; TRIGGER PREFIX MIGRATION
+; A shortcut is a "family member" if it is the old prefix plus exactly one
+; character (everything the seeder uses) - a user's longer shortcut that
+; happens to start with the prefix is never touched. ; family entries live
+; in text_expansion.ahk, ` family entries in launchers.ahk.
+;------------------------------------------------
+; Returns the number of shortcuts moved, or -1 if nothing was changed
+; (the user has been told why).
+ApplyTriggerChange(oldWin, newWin, oldApp, newApp) {
+    global loadedExpansions, loadedLaunchers, instantExpansions
+    global textExpansionPath, launcherPath, config
+    hdrE  := "; Text Expansion file - Format: shortcut expansion"
+    hdrL  := "; Launcher file - Format: shortcut target"
+    pairs := [[oldWin, newWin], [oldApp, newApp]]
+    expPlan := PlanPrefixMigration(loadedExpansions, pairs, instantExpansions)
+    lnPlan  := PlanPrefixMigration(loadedLaunchers, pairs, Map())
+    ; A renamed shortcut may not land on a name that is already used - in
+    ; its own file or the other one. Any clash stops the whole change, so a
+    ; built-in is never quietly left behind under the old trigger key.
+    clashes := expPlan.clash
+    for , r in expPlan.renamed
+        if (lnPlan.map.Has(r[2]))
+            clashes.Push(r[1] . "  ->  " . r[2] . "   (a launcher already uses " . r[2] . ")")
+    for , r in lnPlan.renamed
+        if (expPlan.map.Has(r[2]))
+            clashes.Push(r[1] . "  ->  " . r[2] . "   (a text expansion already uses " . r[2] . ")")
+    for , c in lnPlan.clash
+        clashes.Push(c)
+    if (clashes.Length) {
+        list := ""
+        for i, c in clashes {
+            if (i > 12) {
+                list .= "   ...and " . (clashes.Length - 12) . " more`n"
+                break
+            }
+            list .= "   " . c . "`n"
+        }
+        MsgBox("These shortcuts can't move to the new trigger keys because the new " .
+               "name is already in use:`n`n" . list .
+               "`nNothing was changed. Rename or delete the shortcuts that are in the " .
+               "way (Edit Shortcuts), or pick different trigger keys.",
+               "Trigger Keys Not Changed", "Icon!")
+        return -1
+    }
+    notChanged := "`n`nThe trigger keys were not changed, and your shortcuts are as they were."
+    if (expPlan.count && !RewriteFile(textExpansionPath, expPlan.map, hdrE, expPlan.inst)) {
+        MsgBox("Couldn't update text_expansion.ahk." . notChanged, "Trigger Keys Not Changed", "Icon!")
+        return -1
+    }
+    if (lnPlan.count && !RewriteFile(launcherPath, lnPlan.map, hdrL)) {
+        RollBackTriggerFiles(expPlan.count, false)
+        MsgBox("Couldn't update launchers.ahk." . notChanged, "Trigger Keys Not Changed", "Icon!")
+        return -1
+    }
+    if (!SaveTriggerPrefs(newWin, newApp)) {
+        RollBackTriggerFiles(expPlan.count, lnPlan.count)
+        MsgBox("Couldn't save the new trigger keys to prefs.ini." . notChanged,
+               "Trigger Keys Not Changed", "Icon!")
+        return -1
+    }
+    config["Triggers"]["WinCmd"]    := newWin
+    config["Triggers"]["AppLaunch"] := newApp
+    return expPlan.count + lnPlan.count
 }
 
-MigratePrefixIn(dataMap, filePath, oldPrefix, newPrefix, headerComment) {
-    count := 0
-    newMap := Map()
-    for sc, target in dataMap {
-        ; Match: oldPrefix followed by exactly one alphanumeric or punctuation char.
-        ; We restrict to a single-char suffix so we never touch a user's
-        ; multi-character shortcut that happens to start with the prefix.
-        if (SubStr(sc, 1, StrLen(oldPrefix)) = oldPrefix
-            && StrLen(sc) = StrLen(oldPrefix) + 1) {
-            newSc := newPrefix . SubStr(sc, StrLen(oldPrefix) + 1)
-            if (!dataMap.Has(newSc) && !newMap.Has(newSc)) {
-                newMap[newSc] := target
-                count++
-                continue
+; Puts the data files back as they are in memory (= before the change)
+RollBackTriggerFiles(expChanged, lnChanged) {
+    global loadedExpansions, loadedLaunchers, textExpansionPath, launcherPath
+    ok := true
+    if (expChanged)
+        ok := RewriteFile(textExpansionPath, loadedExpansions,
+                          "; Text Expansion file - Format: shortcut expansion") && ok
+    if (lnChanged)
+        ok := RewriteFile(launcherPath, loadedLaunchers,
+                          "; Launcher file - Format: shortcut target") && ok
+    if (!ok)
+        MsgBox("Putting the shortcut files back also failed. Copies from before the " .
+               "change are in the backups folder.", "Trigger Keys", "Icon!")
+}
+
+; Works out the renamed copy of a map without changing anything.
+; Returns {map, inst, count, renamed, clash}:
+;   inst    = names keeping the $$ marker
+;   renamed = [old, new] pairs
+;   clash   = descriptions of renames whose new name is already taken
+;             (the caller refuses the whole change if there are any)
+PlanPrefixMigration(dataMap, pairs, instSet) {
+    dest := Map()
+    for sc in dataMap {
+        d := sc
+        for , p in pairs {
+            if (p[1] != "" && p[2] != "" && !(p[1] == p[2])
+                && StrLen(sc) = StrLen(p[1]) + 1 && SubStr(sc, 1, StrLen(p[1])) == p[1]) {
+                d := p[2] . SubStr(sc, StrLen(p[1]) + 1)
+                break
             }
         }
-        newMap[sc] := target
+        dest[sc] := d
     }
-    if (count > 0) {
-        ; Mutate the original Map in place - clear and refill so the caller's
-        ; global variable still points at the same Map object
-        dataMap.Clear()
-        for k, v in newMap
-            dataMap[k] := v
-        RewriteFile(filePath, dataMap, headerComment)
+    newMap := Map()
+    final  := Map()
+    for sc, target in dataMap {          ; names that stay as they are first
+        if (dest[sc] == sc) {
+            newMap[sc] := target
+            final[sc]  := sc
+        }
     }
-    return count
+    count   := 0
+    renamed := []
+    clash   := []
+    for sc, target in dataMap {          ; then the renamed ones
+        if (dest[sc] == sc)
+            continue
+        if (newMap.Has(dest[sc])) {
+            clash.Push(sc . "  ->  " . dest[sc] . "   (" . dest[sc] . " already exists)")
+            continue
+        }
+        newMap[dest[sc]] := target
+        final[sc]        := dest[sc]
+        renamed.Push([sc, dest[sc]])
+        count++
+    }
+    inst := Map()
+    for sc, name in final
+        if (instSet.Has(sc))
+            inst[name] := true
+    return {map: newMap, inst: inst, count: count, renamed: renamed, clash: clash}
 }
 
 ;------------------------------------------------
 ; EDIT GUI
 ;------------------------------------------------
 ShowEditGUI(startTab := "launchers") {
-    gEdit := Gui("+Resize +MinSize640x460", "MultiShortcuts v2.0.0 - Manage Shortcuts")
+    gEdit := Gui("+Resize +MinSize640x460", "MultiShortcuts v2.0.1 - Manage Shortcuts")
     gEdit.SetFont("s10", "Segoe UI")
     gEdit.BackColor := "F5F5F5"
     tabs := gEdit.Add("Tab3", "x8 y8 w784 h460 +BackgroundF5F5F5",
@@ -1980,14 +2586,17 @@ LauncherType(target) {
 }
 
 PopulateExpansionList(lv, filter) {
-    global loadedExpansions
+    global loadedExpansions, hidePreviews
     lv.Delete()
     filter := Trim(filter ?? "")
     count  := 0
     for shortcut, expansion in loadedExpansions {
-        if (filter != "" && !InStr(shortcut, filter) && !InStr(expansion, filter))
+        ; With hidden text, search matches names only (a match on hidden
+        ; text would give its content away)
+        if (filter != "" && !InStr(shortcut, filter) && (hidePreviews || !InStr(expansion, filter)))
             continue
-        lv.Add("", shortcut, StrReplace(StrReplace(expansion, "`r`n", " <- "), "`n", " <- "))
+        lv.Add("", shortcut, hidePreviews ? "(hidden - double-click to see or edit)"
+                             : StrReplace(StrReplace(expansion, "`r`n", " <- "), "`n", " <- "))
         count++
     }
     return count
@@ -2010,7 +2619,7 @@ SortLV(lv, col, dataType, searchCtrl, countCtrl) {
 }
 
 EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
-    global loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath
+    global loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath, instantExpansions
     row := lv.GetNext(0, "Focused")
     if (!row)
         row := lv.GetNext()
@@ -2051,25 +2660,41 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
             MsgBox("Invalid shortcut name.", "Validation", "Icon!")
             return
         }
+        ; A rename may not take a name that another shortcut already has
+        ; (in either file) - that would silently replace it
+        renamed := !(newShortcut == oldShortcut)
+        if (renamed && (loadedLaunchers.Has(newShortcut) || loadedExpansions.Has(newShortcut))) {
+            gInline.Opt("+OwnDialogs")
+            MsgBox("'" . newShortcut . "' is already used by another " .
+                   (loadedLaunchers.Has(newShortcut) ? "launcher" : "text expansion") .
+                   ".`n`nPick a different name, or delete that shortcut first. " .
+                   "Nothing was changed.", "Name Already Used", "Icon!")
+            return
+        }
         if (dataType = "launchers") {
             if (!IsAllowedTarget(newTarget))
                 return
-            if (oldShortcut != newShortcut)
+            if (renamed)
                 loadedLaunchers.Delete(oldShortcut)
             loadedLaunchers[newShortcut] := newTarget
-            RewriteFile(launcherPath, loadedLaunchers, "; Launcher file - Format: shortcut target")
+            ok := RewriteFile(launcherPath, loadedLaunchers, "; Launcher file - Format: shortcut target")
             LoadLaunchers()
             RefreshLauncherTab(lv, searchCtrl, countCtrl)
         } else {
-            if (oldShortcut != newShortcut)
+            if (renamed) {
                 loadedExpansions.Delete(oldShortcut)
+                if (instantExpansions.Has(oldShortcut))       ; keep the $$ instant-fire marker
+                    instantExpansions[newShortcut] := true
+            }
             loadedExpansions[newShortcut] := newTarget
-            RewriteFile(textExpansionPath, loadedExpansions, "; Text Expansion file - Format: shortcut expansion")
+            ok := RewriteFile(textExpansionPath, loadedExpansions, "; Text Expansion file - Format: shortcut expansion")
             LoadTextExpansions()
             RefreshExpansionTab(lv, searchCtrl, countCtrl)
         }
+        if (!ok)
+            return               ; the file wasn't saved - keep the window open
         gInline.Destroy()
-        TrayTip("Saved", newShortcut . " updated", "Iconi")
+        SavedNotice("Saved", newShortcut . " updated")
     }
 }
 
@@ -2088,19 +2713,22 @@ DeleteSelectedRow(lv, dataType, parentGui, countCtrl) {
         return
     if (dataType = "launchers") {
         loadedLaunchers.Delete(shortcut)
-        RewriteFile(launcherPath, loadedLaunchers, "; Launcher file - Format: shortcut target")
+        ok := RewriteFile(launcherPath, loadedLaunchers, "; Launcher file - Format: shortcut target")
         LoadLaunchers()
         RefreshLauncherTab(lv, {Value:""}, countCtrl)
     } else {
         loadedExpansions.Delete(shortcut)
-        RewriteFile(textExpansionPath, loadedExpansions, "; Text Expansion file - Format: shortcut expansion")
+        ok := RewriteFile(textExpansionPath, loadedExpansions, "; Text Expansion file - Format: shortcut expansion")
         LoadTextExpansions()
         RefreshExpansionTab(lv, {Value:""}, countCtrl)
     }
-    TrayTip("Deleted", "'" . shortcut . "' removed", "Iconi")
+    if (!ok)
+        return
+    SavedNotice("Deleted", "'" . shortcut . "' removed")
 }
 
 TestSelectedRow(lv, dataType) {
+    global loadedExpansions
     row := lv.GetNext(0, "Focused")
     if (!row)
         row := lv.GetNext()
@@ -2114,6 +2742,9 @@ TestSelectedRow(lv, dataType) {
         if (MsgBox("Launch:`n" . target . "`n`nProceed?", "Test: " . shortcut, "YesNo Iconi") = "Yes")
             LaunchTarget(target, shortcut)
     } else {
+        ; the list may show "(hidden...)" - preview the real stored text
+        if (loadedExpansions.Has(shortcut))
+            target := loadedExpansions[shortcut]
         MsgBox("This expansion would type:`n`n" . target, "Preview: " . shortcut, "Iconi")
     }
 }
@@ -2185,7 +2816,7 @@ ShowStarterHelp() {
     gHelp.SetFont("s10", "Segoe UI")
     gHelp.BackColor := "FFFFFF"
     title := gHelp.Add("Text", "x0 y0 w560 h40 +0x200 Background1A1A2E cWhite Center",
-                        "  MultiShortcuts v2.0.0 - Starter Mode  ")
+                        "  MultiShortcuts v2.0.1 - Starter Mode  ")
     title.SetFont("s12 Bold", "Segoe UI")
 
     sections := [
@@ -2264,11 +2895,11 @@ ShowStarterHelp() {
 ShowFullHelp() {
     global config, holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
     hk := config["Hotkeys"]
-    gHelp := Gui("+ToolWindow", "Help - MultiShortcuts v2.0.0")
+    gHelp := Gui("+ToolWindow", "Help - MultiShortcuts v2.0.1")
     gHelp.SetFont("s10", "Segoe UI")
     gHelp.BackColor := "FFFFFF"
     title := gHelp.Add("Text", "x0 y0 w500 h40 +0x200 Background1A1A2E cWhite Center",
-                        "  MultiShortcuts v2.0.0  ")
+                        "  MultiShortcuts v2.0.1  ")
     title.SetFont("s12 Bold", "Segoe UI")
     sections := [
         [holdKeysOn ? "HOLD KEYS  (on)" : "HOLD KEYS  (off - turn on in the tray menu)", [
@@ -2419,9 +3050,13 @@ LoadLaunchers() {
                 parts := StrSplit(line, " ", , 2)
                 if (parts.Length >= 2) {
                     shortcut := Trim(parts[1])
-                    target   := StrReplace(Trim(parts[2]), "[NEWLINE]", "`n")
+                    target   := DecodeNewlines(Trim(parts[2]))
 
-                    if (shortcut != "" && target != "" && IsValidShortcut(shortcut, false)) {
+                    ; A name listed twice: the first one counts (the same
+                    ; rule as text expansions), so the editor and the
+                    ; hotstring always agree
+                    if (shortcut != "" && target != "" && IsValidShortcut(shortcut, false)
+                        && !loadedLaunchers.Has(shortcut)) {
                         ; Store in map
                         loadedLaunchers[shortcut] := target
                         count++
@@ -2523,7 +3158,7 @@ DoExpand(text, sc) {
                 }
                 fullTok := SubStr(text, i, j - i)
                 seqTokens.Push(fullTok)
-                protected .= "##SEQ" . seqTokens.Length . "##"
+                protected .= Chr(0xE001) . seqTokens.Length . Chr(0xE001)
                 i := j
                 continue
             }
@@ -2537,7 +3172,7 @@ DoExpand(text, sc) {
 
     ; ── Step 3: restore sequence tokens ──────────────────────────────────────
     for idx, tok in seqTokens
-        resolved := StrReplace(resolved, "##SEQ" . idx . "##", tok)
+        resolved := StrReplace(resolved, Chr(0xE001) . idx . Chr(0xE001), tok)
 
     TrackUsage(sc, "expansion")
     PlayFeedback("ExpandSound")
@@ -2560,6 +3195,7 @@ DoExpand(text, sc) {
     if (!hasSequence) {
         ; ── Simple (no-sequence) path ───────────────────────────────────────
         cursorPos := TakeCursorMarker(&resolved)
+        resolved  := UnshieldBraces(resolved)
         if (resolved = "")
             return
         SendExpandText(resolved, config, true)
@@ -2608,7 +3244,7 @@ DoExpand(text, sc) {
                 if (textAccum != "") {
                     TakeCursorMarker(&textAccum)
                     if (textAccum != "")
-                        SendExpandText(textAccum, config, false)
+                        SendExpandText(UnshieldBraces(textAccum), config, false)
                     textAccum := ""
                 }
 
@@ -2629,17 +3265,32 @@ DoExpand(text, sc) {
                     Sleep(config["Performance"]["SequenceDelay"])
                     Send(stokValue)
                 } else if (stokType = "wait") {
+                    ; Capped, so a mistyped or imported {wait:} can't freeze
+                    ; the expansion (and the keyboard hooks) for minutes
                     ms := IsInteger(stokValue) ? Integer(stokValue) : 0
+                    if (ms > config["Performance"]["MaxWaitMs"])
+                        ms := config["Performance"]["MaxWaitMs"]
                     if (ms > 0)
                         Sleep(ms)
                 } else if (stokType = "focus") {
                     Sleep(config["Performance"]["SequenceDelay"])
-                    try {
-                        WinActivate("ahk_exe " . stokValue)
-                    } catch {
-                        try WinActivate(stokValue)
+                    ; Match by program (notepad.exe) or by window title. If that
+                    ; window can't be brought to the front, stop: typing the rest
+                    ; into whatever is active could put private text in the
+                    ; wrong place.
+                    crit := WinExist("ahk_exe " . stokValue) ? "ahk_exe " . stokValue : stokValue
+                    focused := false
+                    if (WinExist(crit)) {
+                        try WinActivate(crit)
+                        focused := (WinWaitActive(crit, , 2) != 0)
                     }
-                    try WinWaitActive(stokValue, , 0.5)
+                    if (!focused) {
+                        PlayFeedback("ErrorSound")
+                        TrayTip("Shortcut Stopped", "'" . sc . "' couldn't switch to '" .
+                                stokValue . "', so the rest wasn't typed.", "Icon!")
+                        RecordExpansionHistory(sc, sc, -1)
+                        return
+                    }
                 }
 
                 si := sj
@@ -2656,7 +3307,7 @@ DoExpand(text, sc) {
     if (textAccum != "") {
         cursorPos := TakeCursorMarker(&textAccum)
         if (textAccum != "")
-            SendExpandText(textAccum, config, true)
+            SendExpandText(UnshieldBraces(textAccum), config, true)
     }
     if (cursorPos > 0)
         Send("{Left " . (cursorPos + 1) . "}")
@@ -2682,7 +3333,11 @@ TakeCursorMarker(&text) {
 
 ; Puts text on the clipboard while asking Windows to keep it out of
 ; clipboard history (Win+V) and cloud clipboard sync - expansions may
-; contain private information. Falls back to a normal copy on failure.
+; contain private information. All three privacy markers must be set; if
+; any step fails, the clipboard is emptied before it is closed (so the
+; text is never left there unprotected).
+; Returns 1 = done, 0 = clipboard busy and not touched, -1 = failed after
+; the clipboard was emptied (the caller types instead and restores it).
 SetClipboardPrivate(txt) {
     opened := false
     loop 5 {
@@ -2692,15 +3347,20 @@ SetClipboardPrivate(txt) {
         }
         Sleep(20)
     }
-    if (!opened) {
-        A_Clipboard := txt
-        return
-    }
+    if (!opened)
+        return 0                 ; clipboard not touched at all
     try {
-        DllCall("EmptyClipboard")
+        if (!DllCall("EmptyClipboard"))
+            throw Error("EmptyClipboard failed")
         ; The text itself (CF_UNICODETEXT = 13)
         hText := DllCall("GlobalAlloc", "UInt", 0x42, "UPtr", (StrLen(txt) + 1) * 2, "Ptr")
+        if (!hText)
+            throw Error("GlobalAlloc failed")
         pText := DllCall("GlobalLock", "Ptr", hText, "Ptr")
+        if (!pText) {
+            DllCall("GlobalFree", "Ptr", hText)
+            throw Error("GlobalLock failed")
+        }
         StrPut(txt, pText, "UTF-16")
         DllCall("GlobalUnlock", "Ptr", hText)
         if (!DllCall("SetClipboardData", "UInt", 13, "Ptr", hText, "Ptr")) {
@@ -2711,43 +3371,78 @@ SetClipboardPrivate(txt) {
         for , fmtName in ["ExcludeClipboardContentFromMonitorProcessing",
                           "CanIncludeInClipboardHistory",
                           "CanUploadToCloudClipboard"] {
-            fmt  := DllCall("RegisterClipboardFormat", "Str", fmtName, "UInt")
+            fmt := DllCall("RegisterClipboardFormat", "Str", fmtName, "UInt")
+            if (!fmt)
+                throw Error("RegisterClipboardFormat failed: " . fmtName)
             hVal := DllCall("GlobalAlloc", "UInt", 0x42, "UPtr", 4, "Ptr")   ; zeroed DWORD = "no"
-            if (fmt && hVal && !DllCall("SetClipboardData", "UInt", fmt, "Ptr", hVal, "Ptr"))
+            if (!hVal)
+                throw Error("GlobalAlloc failed: " . fmtName)
+            if (!DllCall("SetClipboardData", "UInt", fmt, "Ptr", hVal, "Ptr")) {
                 DllCall("GlobalFree", "Ptr", hVal)
+                throw Error("SetClipboardData failed: " . fmtName)
+            }
         }
         DllCall("CloseClipboard")
+        return 1
     } catch {
+        ; Take the text back off before closing, so clipboard history never
+        ; sees it without its markers
+        DllCall("EmptyClipboard")
         DllCall("CloseClipboard")
-        A_Clipboard := txt
+        return -1                ; clipboard was emptied - caller restores it
     }
 }
 
 ; Types a chunk of text by pasting it, then restores the user's clipboard
 SendExpandText(txt, cfg, addSpace := true) {
+    global privateTyping
     tail := addSpace ? " " : ""
+    ; Private typing mode (tray menu): the clipboard is never touched, so no
+    ; clipboard history or clipboard manager - Microsoft's or anyone else's -
+    ; can ever see the text. Slower for long text.
+    if (privateTyping) {
+        TypeExpandText(txt . tail, cfg)
+        return
+    }
     savedClip := ClipboardAll()
-    SetClipboardPrivate(txt)
-    if (ClipWait(1)) {
+    ; The old clipboard is put back only if nothing else has changed the
+    ; clipboard since this script last did - Windows counts every change
+    ; (GetClipboardSequenceNumber), so a newer copy is never overwritten.
+    r := SetClipboardPrivate(txt)
+    mySeq := DllCall("GetClipboardSequenceNumber", "UInt")
+    if (r = 1 && ClipWait(1)) {
         Send("^v")
         Sleep(150)          ; let the target app process the paste
         if (addSpace)
             Send(" ")       ; space as a separate keystroke - not trimmed by the app
-        Sleep(100)          ; slow apps (RDP, Electron) may still be reading the clipboard
-    } else {
-        ; Clipboard unavailable - type the text instead ({Text} mode, so
-        ; characters like ! ^ + { } are typed literally)
-        if (StrLen(txt) > cfg["Performance"]["LargeTextThreshold"])
-            SendEvent("{Text}" . txt . tail)
-        else
-            SendText(txt . tail)
+        Sleep(cfg["Performance"]["ClipRestoreDelay"])   ; slow apps (RDP, Electron) may still be pasting
+        if (DllCall("GetClipboardSequenceNumber", "UInt") = mySeq)
+            A_Clipboard := savedClip
+        return
     }
-    A_Clipboard := savedClip
+    ; If the private copy fails, type the text instead of putting it on the
+    ; clipboard without the privacy markers (Win+V history, cloud sync)
+    TypeExpandText(txt . tail, cfg)
+    if (r != 0 && DllCall("GetClipboardSequenceNumber", "UInt") = mySeq)
+        A_Clipboard := savedClip       ; only if we changed it and nobody else has since
 }
+
+; Types text key by key ({Text} mode, so ! ^ + { } are typed literally)
+TypeExpandText(txt, cfg) {
+    if (StrLen(txt) > cfg["Performance"]["LargeTextThreshold"])
+        SendEvent("{Text}" . txt)
+    else
+        SendText(txt)
+}
+
+; Text from the clipboard or a {prompt:} answer is plain text: hide its
+; braces so it can never be read as {key:...} or another instruction
+ShieldBraces(t) => StrReplace(t, "{", Chr(0xE000))
+UnshieldBraces(t) => StrReplace(t, Chr(0xE000), "{")
 
 ; Placeholder registry
 global placeholderRegistry := Map(
-    "clip",   (fmt) => SanitizedClip(fmt),
+    "clip",   (fmt) => ShieldBraces(SanitizedClip(fmt)),
     "date",   (fmt) => fmt = "locale" ? FormatTime(, "ShortDate")
                      : RegExMatch(fmt, "^\+(\d+):(.+)$", &m) ? FormatTime(DateAdd(A_Now, Integer(m[1]), "Days"), m[2])
                      : RegExMatch(fmt, "^\+(\d+)$", &m)       ? FormatTime(DateAdd(A_Now, Integer(m[1]), "Days"), "MMMM d, yyyy")
@@ -2760,7 +3455,7 @@ global placeholderRegistry := Map(
     "user",   (fmt) => A_UserName,
     "comp",   (fmt) => A_ComputerName,
     "cursor", (fmt) => "",
-    "prompt", (fmt) => PromptDuringExpansion(fmt)
+    "prompt", (fmt) => ShieldBraces(PromptDuringExpansion(fmt))
 )
 
 ; ── Clipboard sanitization ────────────────────────────────────────────────
@@ -2891,21 +3586,27 @@ LoadTextExpansions() {
     try {
         content := FileRead(textExpansionPath, "UTF-8")
         for line in StrSplit(content, "`n", "`r") {
-            line := Trim(line)
-            if (line = "" || SubStr(line, 1, 2) = ";;" || SubStr(line, 1, 2) = "; ")
+            ; Only leading space is trimmed: trailing spaces belong to the
+            ; expansion (the editor keeps them on purpose)
+            line := LTrim(line, " `t")
+            if (Trim(line) = "" || SubStr(line, 1, 2) = ";;" || SubStr(line, 1, 2) = "; ")
                 continue
             if (InStr(line, " ")) {
                 parts := StrSplit(line, " ", , 2)
                 if (parts.Length >= 2) {
                     shortcut  := Trim(parts[1])
-                    expansion := StrReplace(parts[2], "[NEWLINE]", "`n")
+                    expansion := DecodeNewlines(parts[2])
                     ; SpeedKee compatibility: $$ suffix = instant fire
                     instantForced := false
-                    if (SubStr(shortcut, -1) = "$$") {
+                    if (SubStr(shortcut, -2) = "$$") {
                         shortcut      := SubStr(shortcut, 1, StrLen(shortcut) - 2)
                         instantForced := true
                     }
-                    if (shortcut != "" && expansion != "" && IsValidShortcut(shortcut, false)) {
+                    ; A name listed twice (e.g. "abc" and "abc$$"): the first
+                    ; one counts and later ones are ignored, so a second copy
+                    ; can't quietly take over
+                    if (shortcut != "" && Trim(expansion) != "" && IsValidShortcut(shortcut, false)
+                        && !loadedExpansions.Has(shortcut)) {
                         try {
                             opts := instantForced ? ":*OC:" : GetHotstringOptions(shortcut)
                             Hotstring(opts . shortcut, MakeExpansionCallback(expansion, shortcut))
@@ -2931,67 +3632,80 @@ LoadTextExpansions() {
 ;------------------------------------------------
 ;------------------------------------------------
 ; AUTO-MIGRATION
-; Fixes legacy {date+N:format} -> {date:+N:format}
-; Runs silently on startup - safe to run every time
+; Fixes old file formats on startup. Both go through ReplaceFileSafely
+; (lock, dated backup, temp file + atomic swap), so an interrupted or
+; failed migration leaves the original file untouched. A quick unlocked
+; look first means nothing is locked or backed up when there's nothing
+; to fix - the usual case.
 ;------------------------------------------------
+; Legacy {date+N:format} -> {date:+N:format}
 MigrateDateSyntax() {
     global textExpansionPath
     if (!FileExist(textExpansionPath))
         return
-    tmp := textExpansionPath . ".tmp"
     try {
-        content := FileRead(textExpansionPath, "UTF-8")
-        if (!InStr(content, "{date+"))
+        if (!InStr(FileRead(textExpansionPath, "UTF-8"), "{date+"))
             return
-        fixed := RegExReplace(content, "\{date\+(\d+):([^}]+)\}", "{date:+$1:$2}")
-        if (fixed != content) {
-            if (FileExist(tmp))
-                FileDelete(tmp)
-            FileAppend(fixed, tmp, "UTF-8")
-            FileCopy(tmp, textExpansionPath, 1)
-        }
     } catch {
-        ; Migration failed silently - not critical
-    } finally {
-        try FileDelete(tmp)
+        return       ; can't read it right now - LoadTextExpansions reports that
     }
+    err := ReplaceFileSafely(textExpansionPath, FixDateSyntax, 2)
+    if (err != "")
+        MigrationFailed(textExpansionPath)
 }
 
+FixDateSyntax(content) {
+    return RegExReplace(content, "\{date\+(\d+):([^}]+)\}", "{date:+$1:$2}")
+}
+
+; Old pipe-separated format (shortcut|expansion) -> space-separated
 MigratePipeSeparators() {
-    ; Converts old pipe-separated format (shortcut|expansion) to space-separated
-    ; Runs silently on startup - safe to run every time
     global textExpansionPath, launcherPath
     for , filePath in [textExpansionPath, launcherPath] {
         if (!FileExist(filePath))
             continue
-        tmp := filePath . ".tmp"
         try {
             content := FileRead(filePath, "UTF-8")
-            if (!InStr(content, "|"))
-                continue
-            fixed := ""
-            for line in StrSplit(content, "`n", "`r") {
-                trimmed := Trim(line)
-                if (trimmed = "" || SubStr(trimmed, 1, 1) = ";") {
-                    fixed .= line . "`n"
-                    continue
-                }
-                ; Only replace first | with space (old separator format)
-                if (InStr(trimmed, "|") && !InStr(trimmed, " "))
-                    trimmed := StrReplace(trimmed, "|", " ", , , 1)
-                fixed .= trimmed . "`n"
-            }
-            if (fixed != content) {
-                if (FileExist(tmp)) FileDelete(tmp)
-                FileAppend(fixed, tmp, "UTF-8")
-                FileCopy(tmp, filePath, 1)
-            }
         } catch {
-            ; Migration failed silently - not critical
-        } finally {
-            try FileDelete(tmp)
+            continue
+        }
+        if (FixPipeSeparators(content) == content)
+            continue
+        err := ReplaceFileSafely(filePath, FixPipeSeparators, 2)
+        if (err != "")
+            MigrationFailed(filePath)
+    }
+}
+
+; Returns content unchanged unless some line really is in the old format
+FixPipeSeparators(content) {
+    if (!InStr(content, "|"))
+        return content
+    lines   := StrSplit(content, "`n", "`r")
+    changed := false
+    for i, line in lines {
+        trimmed := Trim(line)
+        if (trimmed = "" || SubStr(trimmed, 1, 1) = ";")
+            continue
+        ; Only replace first | with space (old separator format)
+        if (InStr(trimmed, "|") && !InStr(trimmed, " ")) {
+            lines[i] := StrReplace(trimmed, "|", " ", , , 1)
+            changed  := true
         }
     }
+    if (!changed)
+        return content
+    out := ""
+    for i, line in lines
+        out .= line . (i < lines.Length ? "`n" : "")
+    return out
+}
+
+MigrationFailed(filePath) {
+    SplitPath(filePath, &name)
+    TrayTip("File Update Skipped",
+            "Couldn't update the format of " . name . " (it may be in use)." .
+            "`nThe file was not changed. This is tried again at the next start.", "Icon!")
 }
 
 InitializeFiles() {
@@ -3106,12 +3820,16 @@ SeedDefaultExpansions() {
     ; built-in - two hotstrings with one trigger fight over it.
     existing := (FileExist(textExpansionPath) ? FileRead(textExpansionPath, "UTF-8") : "")
               . "`n" . (FileExist(launcherPath) ? FileRead(launcherPath, "UTF-8") : "")
+    ; Collected first and saved in one go (one safe file replace)
+    missing := ""
     for entry in defaults {
         sc  := entry[1]
         exp := entry[2]
         if (!RegExMatch(existing, "(?m)^\Q" . sc . "\E "))
-            LockedFileAppend(textExpansionPath, sc . " " . exp . "`n")
+            missing .= sc . " " . exp . "`n"
     }
+    if (missing != "")
+        LockedFileAppend(textExpansionPath, missing)
 
     ; Seed the ` family - these are app launchers, not text expansions,
     ; so they live in launchers.ahk
@@ -3138,12 +3856,16 @@ SeedDefaultLaunchers() {
     ; Check both files, as in SeedDefaultExpansions
     existing := (FileExist(launcherPath) ? FileRead(launcherPath, "UTF-8") : "")
               . "`n" . (FileExist(textExpansionPath) ? FileRead(textExpansionPath, "UTF-8") : "")
+    ; Collected first and saved in one go (one safe file replace)
+    missing := ""
     for entry in defaults {
         sc  := entry[1]
         exp := entry[2]
         if (!RegExMatch(existing, "(?m)^\Q" . sc . "\E "))
-            LockedFileAppend(launcherPath, sc . " " . exp . "`n")
+            missing .= sc . " " . exp . "`n"
     }
+    if (missing != "")
+        LockedFileAppend(launcherPath, missing)
 }
 
 ;------------------------------------------------
@@ -3327,12 +4049,12 @@ ApplyHoldKeys() {
     cstate := capsKeyOn  ? "On" : "Off"
     mstate := mouseKeyOn ? "On" : "Off"
     try {
-        Hotkey("*$vkBA", (*) => HoldKey("vkBA", 0xBA, "LCtrl"), state . " I1")
-        Hotkey("*$vkC0", (*) => HoldKey("vkC0", 0xC0, "LAlt"),  state . " I1")
+        Hotkey("*$vkBA", (*) => HoldKey("vkBA", 0xBA, "LCtrl"), state . " I1 B")
+        Hotkey("*$vkC0", (*) => HoldKey("vkC0", 0xC0, "LAlt"),  state . " I1 B")
         ; Caps Lock types a backtick on a tap
-        Hotkey("*CapsLock", CapsLockKey, cstate . " I1")
+        Hotkey("*CapsLock", CapsLockKey, cstate . " I1 B")
         ; The middle button copies Caps Lock (` / Alt) or the semicolon (; / Ctrl)
-        Hotkey("*MButton", MiddleButtonKey, mstate . " I1")
+        Hotkey("*MButton", MiddleButtonKey, mstate . " I1 B")
         if (capsKeyOn && GetKeyState("CapsLock", "T"))
             SetCapsLockState("Off")      ; a tap no longer switches it off
     } catch Error as err {
@@ -3433,28 +4155,10 @@ SetMouseMode(mode) {
 ; One-time announcement for people upgrading from a version without hold keys
 
 ShowHoldKeysNews() {
-    MsgBox(
-        "NEW - Ctrl and Alt, now on your home row:`n" .
-        "the same shortcuts, without the reach.`n" .
-        "`n" .
-        "SEMICOLON  -  hold it for Ctrl`n" .
-        "   hold `; + C = Copy,   hold `; + V = Paste`n" .
-        "`n" .
-        "CAPS LOCK  -  hold it for Alt, tap it for ```n" .
-        "   hold Caps Lock + Tab = switch windows`n" .
-        "   tap Caps Lock, then c = open Claude`n" .
-        "   Shift + Caps Lock = normal Caps Lock`n" .
-        "`n" .
-        "MIDDLE MOUSE BUTTON  -  works like `;`n" .
-        "   click it, then v = Paste`n" .
-        "   highlight, hold the wheel, tap C = Copy`n" .
-        "   Shift + middle click = normal middle click`n" .
-        "`n" .
-        "A quick tap of `; still types it, so your`n" .
-        "shortcuts work as before.`n" .
-        "`n" .
-        "To change any of this, right-click the tray icon.",
-        "What's New in MultiShortcuts Pro 2.0", "Iconi")
+    MsgBox("NEW - the same shortcuts, without the reach.`n`n" . HoldKeysIntro() .
+           "Use it for nothing else, and your computer is already easier to use.`n" .
+           "Tray menu > Quick Start shows this again.",
+           "What's New in MultiShortcuts Pro 2.0", "Iconi")
 }
 
 ToggleHoldKeys(*) {
@@ -3496,15 +4200,64 @@ SetHoldKeysTime(*) {
 ; key = the physical key or button, tapKey = what a tap types (default: key)
 HoldKey(key, vkNum, modifier, tapKey := "") {
     global holdKeysMs
-    typed := (tapKey != "") ? tapKey : key
+    static holdEndTick := Map()            ; key -> when its last hold ended
+    ; While a key is held as Ctrl/Alt, Windows auto-repeats it. The hotkey
+    ; saves one of those repeats (option B) and runs it the moment the key
+    ; is let go - it isn't a real press, so it must not type the character.
+    ; A real new press would find the key down; a repeat finds it up.
+    if (holdEndTick.Has(key) && A_TickCount - holdEndTick[key] < 100
+        && !GetKeyState(key, "P"))
+        return
+    typed    := (tapKey != "") ? tapKey : key
+    priorKey := A_PriorKey                 ; the key pressed before this one
 
-    ; Catch a key pressed while this one is still down - a fast roll like ";c"
-    ih := InputHook("L1")
+    ; ── Ordered key queue ────────────────────────────────────────────────
+    ; Until we know whether this is a tap or a hold, EVERY key pressed after
+    ; it - letters, Enter, arrows, F-keys alike - is held back and recorded
+    ; as a key event, in the order Windows delivered it, together with the
+    ; Shift/Ctrl/Alt/Win state at that moment. Nothing ends the hold-back
+    ; early and lets later keys slip past: the queue is replayed in order
+    ; while the hook is still holding back anything newer, and the hook is
+    ; only stopped once typing pauses.
+    ;   I2   this script's own replays (SendLevel 1) pass through untouched
+    ;   NS   every key: report it (N) and hold it back (S)
+    ;   -S   Shift/Ctrl/Alt/Win themselves are not held back (only tracked)
+    downMods := Map()                      ; modifier vk -> true while down
+    for , mvk in [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C]
+        if (GetKeyState("vk" . Format("{:02X}", mvk), "P"))
+            downMods[mvk] := true
+    startPrefix := ModPrefix(downMods)
+    q  := []                               ; [vk, sc, modifier prefix]
+    st := {stopNow: false}
+
+    OnDown(hook, vk, sc) {
+        Critical
+        if (ModChar(vk) != "") {
+            downMods[NormalizeModVk(vk, sc)] := true
+            if (ModChar(vk) != "+")
+                st.stopNow := true         ; Ctrl/Alt/Win: a shortcut is coming
+            return
+        }
+        if (vk = vkNum)
+            return                         ; this key's own auto-repeat
+        q.Push([vk, sc, ModPrefix(downMods)])
+    }
+    OnUp(hook, vk, sc) {
+        Critical
+        if (ModChar(vk) != "")
+            downMods.Delete(NormalizeModVk(vk, sc))
+    }
+
+    ih := InputHook("I2")
+    ih.KeyOpt("{All}", "NS")
+    ih.KeyOpt("{LShift}{RShift}{LCtrl}{RCtrl}{LAlt}{RAlt}{LWin}{RWin}", "-S")
+    ih.OnKeyDown := OnDown
+    ih.OnKeyUp   := OnUp
     ih.Start()
     t0 := A_TickCount
     result := ""
     loop {
-        if (!ih.InProgress) {
+        if (q.Length || st.stopNow) {
             result := "rolled"      ; another key came first: normal typing
             break
         }
@@ -3513,24 +4266,25 @@ HoldKey(key, vkNum, modifier, tapKey := "") {
             break
         }
         if (A_TickCount - t0 >= holdKeysMs) {
-            result := "hold"        ; held long enough to act as a modifier
+            ih.Stop()
+            Sleep(10)               ; let reports from the last instant arrive
+            ; a key that arrived in the last instant still counts as typing
+            result := (q.Length || st.stopNow) ? "rolled" : "hold"
             break
         }
         Sleep(5)
     }
-    if (ih.InProgress)
-        ih.Stop()
 
-    if (result = "tap") {
-        HoldKeyType(typed)
-        return
-    }
-    if (result = "rolled") {
-        ; Put this key first, then the one that was rolled onto, in order
-        HoldKeyType(typed)
-        SendLevel(1)
-        SendEvent("{Text}" . ih.Input)
-        SendLevel(0)
+    if (result != "hold") {
+        ; A fast ; + letter that is a ; shortcut (;c ;v ;a ...): run it
+        ; without typing the ; - typing it would replace highlighted text
+        ; before ;c could copy it
+        if (result = "rolled" && RunWinCmdFromRoll(typed, startPrefix, priorKey, ih, q, st))
+            return
+        ; This key first (with the modifiers held when it was pressed),
+        ; then everything held back, in order
+        HoldKeyType(typed, startPrefix)
+        DrainHeldKeys(ih, q, st)
         return
     }
 
@@ -3540,32 +4294,159 @@ HoldKey(key, vkNum, modifier, tapKey := "") {
     watch.KeyOpt("{All}", "N")
     watch.OnKeyDown := (hook, vk, sc) => (vk != vkNum ? state.pressed := true : 0)
     Send("{Blind}{" . modifier . " down}")
-    watch.Start()
-    KeyWait(key)
-    watch.Stop()
-    if (modifier = "LAlt")
-        Send("{Blind}{vkE8}")               ; stops a lone Alt release opening menus
-    Send("{Blind}{" . modifier . " up}")
+    try {
+        watch.Start()
+        KeyWait(key)
+    } finally {
+        ; always let go of Ctrl/Alt, even if something above failed
+        try watch.Stop()
+        if (modifier = "LAlt")
+            Send("{Blind}{vkE8}")           ; stops a lone Alt release opening menus
+        Send("{Blind}{" . modifier . " up}")
+        holdEndTick[key] := A_TickCount    ; a saved auto-repeat now is ignored
+    }
     ; Held but used for no key: a key still types its character. Not the mouse
     ; button - its hold may have been Ctrl + scroll (zoom) or Ctrl + click.
     if (!state.pressed && key != "MButton")
         HoldKeyType(typed)
 }
 
+; Replays held-back keys in order. The hook keeps holding back (and
+; queueing) anything newer while this runs, so a key pressed during the
+; replay waits its turn instead of jumping ahead. The hook is stopped only
+; once typing pauses (30 ms with nothing new), when Ctrl/Alt/Win starts a
+; shortcut, or after 0.6 s of continuous typing - then the last reports
+; are collected and replayed too.
+DrainHeldKeys(ih, q, st) {
+    quiet   := A_TickCount
+    started := A_TickCount
+    loop {
+        if (q.Length) {
+            ReplayHeldKey(q.RemoveAt(1))
+            quiet := A_TickCount
+            continue
+        }
+        if (!ih.InProgress || st.stopNow
+            || A_TickCount - quiet >= 30 || A_TickCount - started >= 600)
+            break
+        Sleep(5)                           ; lets new key reports arrive
+    }
+    if (ih.InProgress)
+        ih.Stop()
+    Sleep(10)                              ; reports for keys held just before the stop
+    while (q.Length)
+        ReplayHeldKey(q.RemoveAt(1))
+}
+
+; Fast roll from the ; key into one key that makes a ; shortcut: runs the
+; shortcut directly and returns true. Returns false - the caller then types
+; everything normally - in every other case:
+;   - not the ; key, or the ; family uses another trigger character
+;   - ; was pressed with Shift/Ctrl/Alt/Win (Shift + ; is a colon)
+;   - right after a letter or digit (inside a word, code, a URL), where
+;     the ; shortcut wouldn't fire anyway
+;   - more than one key, Ctrl/Alt/Win, or a key that isn't a ; shortcut
+RunWinCmdFromRoll(typed, startPrefix, priorKey, ih, q, st) {
+    global config, loadedExpansions
+    if (typed != "vkBA" || config["Triggers"]["WinCmd"] != ";" || startPrefix != "")
+        return false
+    if (RegExMatch(priorKey, "^[A-Za-z0-9]$"))
+        return false
+    if (st.stopNow || q.Length != 1)
+        return false
+    ch := RollChar(q[1])
+    if (ch = "" || !loadedExpansions.Has(";" . ch))
+        return false
+    ; Stop holding keys back, then make sure nothing else slipped in
+    if (ih.InProgress)
+        ih.Stop()
+    Sleep(10)
+    if (st.stopNow || q.Length != 1)
+        return false                       ; the caller types it all, in order
+    q.RemoveAt(1)
+    DoExpand(loadedExpansions[";" . ch], ";" . ch)
+    return true
+}
+
+; The character a held-back key event types, for the ; shortcuts only:
+; letters, digits, < and >. "" for anything else.
+RollChar(ev) {
+    vk := ev[1]
+    p  := ev[3]
+    if (p != "" && p != "+")
+        return ""                          ; Ctrl/Alt/Win involved
+    shift := (p = "+")
+    if (vk >= 0x41 && vk <= 0x5A) {        ; A-Z (Caps Lock flips the case)
+        upper := (shift != GetKeyState("CapsLock", "T"))
+        return upper ? Chr(vk) : StrLower(Chr(vk))
+    }
+    if (vk >= 0x30 && vk <= 0x39 && !shift)
+        return Chr(vk)
+    if (shift && vk = 0xBC)
+        return "<"
+    if (shift && vk = 0xBE)
+        return ">"
+    return ""
+}
+
+; One held-back key, pressed again exactly as it was: same key, same
+; Shift/Ctrl/Alt/Win state. SendLevel 1 so this script's hotstrings see it.
+ReplayHeldKey(ev) {
+    SendLevel(1)
+    SendEvent(ev[3] . "{vk" . Format("{:02X}", ev[1]) . "sc" . Format("{:03X}", ev[2]) . "}")
+    SendLevel(0)
+}
+
+; "+" Shift, "^" Ctrl, "!" Alt, "#" Win, "" for any other key
+ModChar(vk) {
+    switch vk {
+        case 0x10, 0xA0, 0xA1: return "+"
+        case 0x11, 0xA2, 0xA3: return "^"
+        case 0x12, 0xA4, 0xA5: return "!"
+        case 0x5B, 0x5C:       return "#"
+    }
+    return ""
+}
+
+; Left/right-specific vk for a modifier (some reports use the generic one)
+NormalizeModVk(vk, sc) {
+    switch vk {
+        case 0x10: return (sc = 0x36) ? 0xA1 : 0xA0
+        case 0x11: return (sc & 0x100) ? 0xA3 : 0xA2
+        case 0x12: return (sc & 0x100) ? 0xA5 : 0xA4
+    }
+    return vk
+}
+
+; Send prefix for the modifiers currently down, e.g. "+" or "^+"
+ModPrefix(downMods) {
+    p := ""
+    for mvk in downMods {
+        c := ModChar(mvk)
+        if (c != "" && !InStr(p, c))
+            p .= c
+    }
+    return p
+}
+
 ; Types the key's character at SendLevel 1 so this script's own hotstrings
-; (the ; ` = families and custom shortcuts) still see it
-HoldKeyType(key) {
+; (the ; ` = families and custom shortcuts) still see it.
+;   prefix = "{Blind}" (default): with whatever modifiers are held now
+;   prefix = "", "+", "^" ...: with exactly those modifiers
+HoldKeyType(key, prefix := "{Blind}") {
     ; SendEvent, not Send: the default SendInput mode briefly removes the
     ; keyboard hook, so this script's own hotstrings would never see the key
     SendLevel(1)
-    SendEvent("{Blind}{" . key . "}")
+    SendEvent(prefix . "{" . key . "}")
     SendLevel(0)
 }
 
 ReleaseHoldModifiers(*) {
     global holdKeysOn, capsKeyOn, mouseKeyOn
     if (holdKeysOn || capsKeyOn || mouseKeyOn)
-        Send("{LCtrl up}{LAlt up}")         ; never leave a modifier stuck on exit
+        for , m in ["LCtrl", "LAlt"]           ; never leave a modifier stuck on exit -
+            if (!GetKeyState(m, "P"))         ; but not if you're really holding it
+                Send("{" . m . " up}")
 }
 
 ;------------------------------------------------
