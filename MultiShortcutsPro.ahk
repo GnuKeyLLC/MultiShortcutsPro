@@ -16,6 +16,10 @@
 ;   - editor lists are single-selection (-Multi)
 ;   - leading punctuation alone no longer forces instant-fire hotstrings
 ;   - clipboard is always closed (finally) when setting private text
+; Fix 2026-11-01:
+;   - Alt+ commands pressed with Caps Lock / ` / ; held no longer leave
+;     Alt stuck down in the window they open (RunCommand)
+;   - Edit Shortcuts: Target / Expands To columns always wide enough to read
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -412,24 +416,61 @@ SetupHotkeys() {
     global config
     hk := config["Hotkeys"]
     try {
-        Hotkey(hk["AddExpansion"],        (*) => AddNewExpansion())
-        Hotkey(hk["AddLauncher"],         (*) => AddNewLauncher())
-        Hotkey(hk["CaptureExpansion"],    (*) => CaptureSelectedText())
-        Hotkey(hk["AddDocumentLauncher"], (*) => AddDocumentLauncher())
-        Hotkey(hk["ShowEditGUI"],         (*) => ShowEditGUI("launchers"))
-        Hotkey(hk["AddWebLauncher"],      (*) => AddWebLauncher())
-        Hotkey(hk["ImmediateBackup"],     (*) => ImmediateBackup())
-        Hotkey(hk["QuickTextExpansion"],  (*) => QuickTextExpansion())
-        Hotkey(hk["ManageLaunchers"],     (*) => ShowEditGUI("launchers"))
-        Hotkey(hk["ManageExpansions"],    (*) => ShowEditGUI("expansions"))
-        Hotkey(hk["ShowAllShortcuts"],    (*) => ShowEditGUI("launchers"))
-        Hotkey(hk["ReloadScript"],        (*) => ReloadScript())
-        Hotkey(hk["ShowHelp"],            (*) => ShowHelp())
+        ; Every command goes through RunCommand - see the note there
+        Hotkey(hk["AddExpansion"],        (*) => RunCommand(AddNewExpansion))
+        Hotkey(hk["AddLauncher"],         (*) => RunCommand(AddNewLauncher))
+        Hotkey(hk["CaptureExpansion"],    (*) => RunCommand(CaptureSelectedText))
+        Hotkey(hk["AddDocumentLauncher"], (*) => RunCommand(AddDocumentLauncher))
+        Hotkey(hk["ShowEditGUI"],         (*) => RunCommand(() => ShowEditGUI("launchers")))
+        Hotkey(hk["AddWebLauncher"],      (*) => RunCommand(AddWebLauncher))
+        Hotkey(hk["ImmediateBackup"],     (*) => RunCommand(ImmediateBackup))
+        Hotkey(hk["QuickTextExpansion"],  (*) => RunCommand(QuickTextExpansion))
+        Hotkey(hk["ManageLaunchers"],     (*) => RunCommand(() => ShowEditGUI("launchers")))
+        Hotkey(hk["ManageExpansions"],    (*) => RunCommand(() => ShowEditGUI("expansions")))
+        Hotkey(hk["ShowAllShortcuts"],    (*) => RunCommand(() => ShowEditGUI("launchers")))
+        Hotkey(hk["ReloadScript"],        (*) => RunCommand(ReloadScript))
+        Hotkey(hk["ShowHelp"],            (*) => RunCommand(ShowHelp))
         Hotkey(hk["PauseResume"],         (*) => ToggleMacrosPause(), "S")
-        Hotkey(hk["UndoExpansion"],       (*) => UndoLastExpansion())
-        Hotkey(hk["SnipTool"],            (*) => Send("#+s"))
+        Hotkey(hk["UndoExpansion"],       (*) => RunCommand(UndoLastExpansion))
+        Hotkey(hk["SnipTool"],            (*) => RunCommand(() => Send("#+s")))
     } catch Error as err {
         MsgBox("Hotkey setup error: " . err.Message, "Warning", "Icon!")
+    }
+}
+
+; Runs an Alt+ command (Alt+T, Alt+E ...) safely when it was pressed with a
+; HOLD key acting as Alt or Ctrl (Caps Lock, `, ; or the middle button).
+;
+; The problem: the hold key's routine (HoldKey) presses Alt, then waits for
+; the key to be let go. A command hotkey interrupts it - and a command that
+; opens a window (InputBox, Gui) doesn't finish until that window closes.
+; Until then the paused HoldKey can't send its "Alt up", so Windows keeps
+; Alt down and typing in the new window turns into Alt shortcuts.
+;
+; The fix, in order:
+;   1. wait (up to 2 s) for the hold key to be let go
+;   2. release any modifier that is logically down but not physically held
+;   3. end this hotkey thread, so HoldKey finishes cleanly, and start the
+;      command a moment later in its own thread - no routine is left
+;      paused under the window, so Caps Lock / ` / ; work inside it too
+RunCommand(fn) {
+    for , k in ["CapsLock", "vkC0", "vkBA", "MButton"] {
+        if (GetKeyState(k, "P"))
+            KeyWait(k, "T2")
+    }
+    ClearStuckModifiers()
+    SetTimer(fn, -50)
+}
+
+; Releases every modifier that is down logically (sent by this script) but
+; not physically held. A key the user really holds is left alone.
+ClearStuckModifiers() {
+    for , m in ["LAlt", "RAlt", "LCtrl", "RCtrl", "LShift", "RShift", "LWin", "RWin"] {
+        if (GetKeyState(m) && !GetKeyState(m, "P")) {
+            if (InStr(m, "Alt") || InStr(m, "Win"))
+                Send("{Blind}{vkE8}")      ; mask: a lone Alt/Win release won't open a menu / Start
+            Send("{Blind}{" . m . " up}")
+        }
     }
 }
 
@@ -2486,9 +2527,11 @@ ShowEditGUI(startTab := "launchers") {
     ; -Multi: one row at a time until batch delete is supported
     lvL := gEdit.Add("ListView", "x18 y76 w764 h320 Grid -Multi +LV0x10000 vLvL",
                      ["Shortcut", "Target", "Type"])
-    lvL.ModifyCol(1, "AutoHdr")
-    lvL.ModifyCol(2, "Auto")
-    lvL.ModifyCol(3, "AutoHdr")
+    ; Fixed widths: "Auto" here would size the columns to an empty list
+    ; (rows are added later), leaving the Target column too narrow to read
+    lvL.ModifyCol(1, 160)
+    lvL.ModifyCol(2, 480)
+    lvL.ModifyCol(3, 100)
     gEdit.Add("Button", "x18  y406 w110 h26", "&Edit")
         .OnEvent("Click", (*) => EditSelectedRow(lvL, "launchers", gEdit, searchL, countL))
     gEdit.Add("Button", "x134 y406 w110 h26", "&Delete")
@@ -2514,8 +2557,9 @@ ShowEditGUI(startTab := "launchers") {
     ; -Multi: one row at a time until batch delete is supported
     lvE := gEdit.Add("ListView", "x18 y76 w764 h320 Grid -Multi +LV0x10000 vLvE",
                      ["Shortcut", "Expands To"])
-    lvE.ModifyCol(1, "AutoHdr")
-    lvE.ModifyCol(2, "Auto")
+    ; Fixed widths, so "Expands To" is always wide enough to read
+    lvE.ModifyCol(1, 160)
+    lvE.ModifyCol(2, 580)
     gEdit.Add("Button", "x18  y406 w110 h26", "&Edit")
         .OnEvent("Click", (*) => EditSelectedRow(lvE, "expansions", gEdit, searchE, countE))
     gEdit.Add("Button", "x134 y406 w110 h26", "&Delete")
