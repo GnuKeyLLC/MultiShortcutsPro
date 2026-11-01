@@ -10,6 +10,13 @@
 ; Code review by Gemini (Google)
 ; Part of the SpeedKee Ecosystem
 ;================================================
+; Audit patch 2026-10-31:
+;   - all modifier variants released on exit/reload (before the stats save)
+;   - unclosed {key:/wait:/focus: tokens are typed as text, never run
+;   - editor lists are single-selection (-Multi)
+;   - leading punctuation alone no longer forces instant-fire hotstrings
+;   - clipboard is always closed (finally) when setting private text
+;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
 ;   Alt+A  Add App Launcher
@@ -355,8 +362,6 @@ ShowStarterQuickStart(firstRun := false) {
 
     msg := firstRun ? "Welcome to MultiShortcuts Pro! All of this works now, in any app.`n`n" : ""
     msg .= HoldKeysIntro()
-    msg .= "Just these keys already make your computer easier to use.`n"
-    msg .= "Everything else is a bonus, whenever you want it.`n`n"
     msg .= "TYPE THESE ANYWHERE`n"
     msg .= "   " . wc . "c  Copy       " . wc . "v  Paste      " . wc . "s  Save`n"
     msg .= "   " . al . "c  Claude     " . al . "S  Snip       -=  Today's date`n`n"
@@ -2478,7 +2483,8 @@ ShowEditGUI(startTab := "launchers") {
     gEdit.Add("Button", "x346 y46 w24 h24", "X")
         .OnEvent("Click", (*) => (searchL.Value := "", RefreshLauncherTab(lvL, searchL, countL)))
     countL := gEdit.Add("Text", "x380 y48 w390 h20 +Right cGray vCountL", "")
-    lvL := gEdit.Add("ListView", "x18 y76 w764 h320 Grid +LV0x10000 vLvL",
+    ; -Multi: one row at a time until batch delete is supported
+    lvL := gEdit.Add("ListView", "x18 y76 w764 h320 Grid -Multi +LV0x10000 vLvL",
                      ["Shortcut", "Target", "Type"])
     lvL.ModifyCol(1, "AutoHdr")
     lvL.ModifyCol(2, "Auto")
@@ -2505,7 +2511,8 @@ ShowEditGUI(startTab := "launchers") {
     gEdit.Add("Button", "x346 y46 w24 h24", "X")
         .OnEvent("Click", (*) => (searchE.Value := "", RefreshExpansionTab(lvE, searchE, countE)))
     countE := gEdit.Add("Text", "x380 y48 w390 h20 +Right cGray vCountE", "")
-    lvE := gEdit.Add("ListView", "x18 y76 w764 h320 Grid +LV0x10000 vLvE",
+    ; -Multi: one row at a time until batch delete is supported
+    lvE := gEdit.Add("ListView", "x18 y76 w764 h320 Grid -Multi +LV0x10000 vLvE",
                      ["Shortcut", "Expands To"])
     lvE.ModifyCol(1, "AutoHdr")
     lvE.ModifyCol(2, "Auto")
@@ -3128,40 +3135,44 @@ DoExpand(text, sc) {
 
     ; ── Step 1: protect sequence tokens before running ResolvePlaceholders ───
     ; Scan character-by-character to correctly handle nested braces like
-    ; {key:{Tab}} without confusing the placeholder resolver.
+    ; {key:{Tab}} without confusing the placeholder resolver. A token counts
+    ; only if its braces balance (depth returns to 0). An unclosed one is
+    ; NOT a token: its opening brace is kept as plain, shielded text, so it
+    ; is typed literally and never run, and the rest of the payload is
+    ; scanned normally instead of being swallowed into the token.
     seqTokens := []
     protected := ""
     i := 1
     textLen := StrLen(text)
-    loop {
-        if (i > textLen)
-            break
+    while (i <= textLen) {
         ch := SubStr(text, i, 1)
-        if (ch = "{") {
-            rest := SubStr(text, i)
-            if (RegExMatch(rest, "^\{(key|wait|focus):")) {
-                depth := 0
-                j := i
-                loop {
-                    if (j > textLen) {
-                        depth := 0  ; force safe exit on malformed/unclosed brace
-                        break
-                    }
-                    c := SubStr(text, j, 1)
-                    if (c = "{")
-                        depth++
-                    else if (c = "}")
-                        depth--
-                    j++
-                    if (depth = 0)
-                        break
+        if (ch = "{" && RegExMatch(SubStr(text, i), "^\{(key|wait|focus):")) {
+            depth  := 0
+            closed := false
+            j := i
+            while (j <= textLen) {
+                c := SubStr(text, j, 1)
+                if (c = "{")
+                    depth++
+                else if (c = "}")
+                    depth--
+                j++
+                if (depth = 0) {
+                    closed := true
+                    break
                 }
-                fullTok := SubStr(text, i, j - i)
-                seqTokens.Push(fullTok)
+            }
+            if (closed) {
+                seqTokens.Push(SubStr(text, i, j - i))
                 protected .= Chr(0xE001) . seqTokens.Length . Chr(0xE001)
                 i := j
                 continue
             }
+            ; Unclosed / unbalanced: plain text. Shielded so no later stage
+            ; can read it as {key:...}; UnshieldBraces types it back as "{".
+            protected .= Chr(0xE000)
+            i++
+            continue
         }
         protected .= ch
         i++
@@ -3224,18 +3235,27 @@ DoExpand(text, sc) {
         if (sch = "{") {
             srest := SubStr(resolved, si)
             if (RegExMatch(srest, "^\{(key|wait|focus):")) {
-                ; Consume full token using brace depth
-                sdepth := 0
+                ; Consume full token using brace depth. An unbalanced token
+                ; is typed as text, never run (backstop for Step 1).
+                sdepth  := 0
+                sclosed := false
                 sj := si
-                loop {
+                while (sj <= sLen) {
                     sc2 := SubStr(resolved, sj, 1)
                     if (sc2 = "{")
                         sdepth++
                     else if (sc2 = "}")
                         sdepth--
                     sj++
-                    if (sdepth = 0 || sj > sLen + 1)
+                    if (sdepth = 0) {
+                        sclosed := true
                         break
+                    }
+                }
+                if (!sclosed) {
+                    textAccum .= sch
+                    si++
+                    continue
                 }
                 seqTok := SubStr(resolved, si, sj - si)
 
@@ -3336,6 +3356,10 @@ TakeCursorMarker(&text) {
 ; contain private information. All three privacy markers must be set; if
 ; any step fails, the clipboard is emptied before it is closed (so the
 ; text is never left there unprotected).
+; CloseClipboard is in a finally block, so no error - expected or not -
+; can leave the Windows clipboard locked for every other program. Memory
+; not yet handed to Windows is freed if a step fails. The function runs
+; Critical while it owns the clipboard, so nothing interrupts it there.
 ; Returns 1 = done, 0 = clipboard busy and not touched, -1 = failed after
 ; the clipboard was emptied (the caller types instead and restores it).
 SetClipboardPrivate(txt) {
@@ -3349,6 +3373,12 @@ SetClipboardPrivate(txt) {
     }
     if (!opened)
         return 0                 ; clipboard not touched at all
+
+    wasCritical := A_IsCritical
+    Critical("On")               ; nothing interrupts us while we own the clipboard
+    ok    := false
+    hText := 0                   ; non-zero = we still own this memory
+    hVal  := 0
     try {
         if (!DllCall("EmptyClipboard"))
             throw Error("EmptyClipboard failed")
@@ -3357,16 +3387,13 @@ SetClipboardPrivate(txt) {
         if (!hText)
             throw Error("GlobalAlloc failed")
         pText := DllCall("GlobalLock", "Ptr", hText, "Ptr")
-        if (!pText) {
-            DllCall("GlobalFree", "Ptr", hText)
+        if (!pText)
             throw Error("GlobalLock failed")
-        }
         StrPut(txt, pText, "UTF-16")
         DllCall("GlobalUnlock", "Ptr", hText)
-        if (!DllCall("SetClipboardData", "UInt", 13, "Ptr", hText, "Ptr")) {
-            DllCall("GlobalFree", "Ptr", hText)
+        if (!DllCall("SetClipboardData", "UInt", 13, "Ptr", hText, "Ptr"))
             throw Error("SetClipboardData failed")
-        }
+        hText := 0               ; Windows owns it now
         ; Privacy markers recognised by Windows 10/11 clipboard history
         for , fmtName in ["ExcludeClipboardContentFromMonitorProcessing",
                           "CanIncludeInClipboardHistory",
@@ -3377,20 +3404,25 @@ SetClipboardPrivate(txt) {
             hVal := DllCall("GlobalAlloc", "UInt", 0x42, "UPtr", 4, "Ptr")   ; zeroed DWORD = "no"
             if (!hVal)
                 throw Error("GlobalAlloc failed: " . fmtName)
-            if (!DllCall("SetClipboardData", "UInt", fmt, "Ptr", hVal, "Ptr")) {
-                DllCall("GlobalFree", "Ptr", hVal)
+            if (!DllCall("SetClipboardData", "UInt", fmt, "Ptr", hVal, "Ptr"))
                 throw Error("SetClipboardData failed: " . fmtName)
-            }
+            hVal := 0            ; Windows owns it now
         }
-        DllCall("CloseClipboard")
-        return 1
-    } catch {
-        ; Take the text back off before closing, so clipboard history never
-        ; sees it without its markers
-        DllCall("EmptyClipboard")
-        DllCall("CloseClipboard")
-        return -1                ; clipboard was emptied - caller restores it
+        ok := true
+    } catch Any {
+        ; handled in finally
+    } finally {
+        if (hText)
+            DllCall("GlobalFree", "Ptr", hText)
+        if (hVal)
+            DllCall("GlobalFree", "Ptr", hVal)
+        ; Never leave unmarked text behind: empty it if anything failed
+        if (!ok)
+            try DllCall("EmptyClipboard")
+        DllCall("CloseClipboard")     ; always runs - the clipboard is never left locked
+        Critical(wasCritical)
     }
+    return ok ? 1 : -1               ; -1 = emptied; caller types instead and restores
 }
 
 ; Types a chunk of text by pasting it, then restores the user's clipboard
@@ -3888,32 +3920,36 @@ InsertIntoEdit(ctrl, text) {
 ;------------------------------------------------
 ; HOTSTRING OPTIONS HELPER
 ;------------------------------------------------
-; Returns the correct hotstring option string for a given shortcut.
-; Rules:
-;   - Ends in an uppercase letter  → immediate, case-sensitive  (:*C:)
-;   - Contains any digit           → immediate, case-sensitive  (:*C:)
-;   - Contains any special char    → immediate, case-sensitive  (:*C:)
-;     (anything that is not a-z, A-Z, 0-9)
-;   - All lowercase letters only   → space/terminator required  (:C:)
-;
-; The C option is always included to preserve case as typed.
+; Returns the hotstring option string for a shortcut.
+; Instant fire (:*OC:) only for:
+;   - the built-in ; and ` families (the current trigger characters)
+;   - the = family (starts or ends with =)
+;   - shortcuts ending in an uppercase letter
+;   - digits or punctuation INSIDE the shortcut (after any leading punctuation)
+;   ($$ instant-fire is handled upstream and forces :*OC: directly)
+; Leading punctuation alone (!note, #sig, .addr) does NOT force instant
+; fire - it needs a space/Enter like a plain word, so !notebook still
+; types normally. A shortcut made only of punctuation also needs one.
+; O = AHK's end character is suppressed (DoExpand adds the space).
+; C = case-sensitive.
 ;------------------------------------------------
 GetHotstringOptions(shortcut) {
-    ; NOTE: $$ suffix is handled upstream (stripped before this call)
-    ; and forces :*OC: directly - this function only sees the clean trigger.
-    ; The O flag suppresses AHK's automatic end character so we control spacing.
-    ; Contains any digit?
-    if (RegExMatch(shortcut, "[0-9]"))
+    global config
+    for , trig in [config["Triggers"]["WinCmd"], config["Triggers"]["AppLaunch"]] {
+        if (trig != "" && StrLen(shortcut) > StrLen(trig)
+            && SubStr(shortcut, 1, StrLen(trig)) == trig)
+            return ":*OC:"
+    }
+    if (SubStr(shortcut, 1, 1) = "=" || SubStr(shortcut, -1) = "=")
         return ":*OC:"
-    ; Contains any special character (non-alphabetic)?
-    if (RegExMatch(shortcut, "[^a-zA-Z]"))
+    if (RegExMatch(shortcut, "[A-Z]$"))
         return ":*OC:"
-    ; Ends in uppercase letter?
-    lastChar := SubStr(shortcut, -1)
-    if (RegExMatch(lastChar, "[A-Z]"))
-        return ":*OC:"
-    ; Everything else (pure lowercase) - require terminator (space/enter)
-    return ":OC:"
+    body := RegExReplace(shortcut, "^[^a-zA-Z0-9]+")   ; ignore leading punctuation
+    if (body = "")
+        return ":OC:"                                  ; all punctuation: needs a terminator
+    if (RegExMatch(body, "[^a-zA-Z]"))
+        return ":*OC:"                                 ; digit or inner punctuation
+    return ":OC:"                                      ; plain word: needs a terminator
 }
 
 IsValidShortcut(shortcut, showMessages := true) {
@@ -4156,7 +4192,6 @@ SetMouseMode(mode) {
 
 ShowHoldKeysNews() {
     MsgBox("NEW - the same shortcuts, without the reach.`n`n" . HoldKeysIntro() .
-           "Use it for nothing else, and your computer is already easier to use.`n" .
            "Tray menu > Quick Start shows this again.",
            "What's New in MultiShortcuts Pro 2.0", "Iconi")
 }
@@ -4441,18 +4476,25 @@ HoldKeyType(key, prefix := "{Blind}") {
     SendLevel(0)
 }
 
+; Runs on every exit and reload, whatever the hold-key settings: a hold key
+; or a sequence token ({key:^s}, {key:#l}) interrupted by a reload can leave
+; any modifier logically down (a reload ends the running thread without its
+; finally block). Every variant the user isn't physically holding is released.
 ReleaseHoldModifiers(*) {
-    global holdKeysOn, capsKeyOn, mouseKeyOn
-    if (holdKeysOn || capsKeyOn || mouseKeyOn)
-        for , m in ["LCtrl", "LAlt"]           ; never leave a modifier stuck on exit -
-            if (!GetKeyState(m, "P"))         ; but not if you're really holding it
-                Send("{" . m . " up}")
+    for , m in ["LCtrl", "RCtrl", "LAlt", "RAlt", "LShift", "RShift", "LWin", "RWin"] {
+        if (GetKeyState(m, "P"))
+            continue                          ; really held - leave it alone
+        if (InStr(m, "Alt") || InStr(m, "Win"))
+            Send("{Blind}{vkE8}")             ; mask: a lone Alt/Win release won't open a menu or Start
+        Send("{Blind}{" . m . " up}")
+    }
 }
 
 ;------------------------------------------------
-; Save stats on exit so nothing is lost
+; Save stats on exit so nothing is lost. Modifiers are released first
+; (-1), so a slow stats save can't leave a key stuck down meanwhile.
 OnExit((*) => SaveUsageStats())
-OnExit(ReleaseHoldModifiers)
+OnExit(ReleaseHoldModifiers, -1)
 
 ;------------------------------------------------
 ; END OF SCRIPT
