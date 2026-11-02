@@ -20,6 +20,19 @@
 ;   - Alt+ commands pressed with Caps Lock / ` / ; held no longer leave
 ;     Alt stuck down in the window they open (RunCommand)
 ;   - Edit Shortcuts: Target / Expands To columns always wide enough to read
+;   - symbol-only $$ shortcuts (!!$$, ??$$) fire right after other text,
+;     so they work with SpaceSymbols.ahk (InstantOptions)
+; Instant-fire rule 2026-11-01 (same as SpeedKee on the phone):
+;   - your own shortcuts fire instantly only with $$ - the "Fire instantly"
+;     box in every Add / Edit / Capture window adds it. Without it they
+;     wait for a space or Enter. The built-in ; ` = families stay instant.
+;   - launchers understand $$ too
+;   - one-time update adds $$ to your shortcuts that fired instantly under
+;     the old automatic rule, so they keep working (MigrateToInstantMarker)
+;   - "abc" and "abc$$" can no longer become two hidden copies
+; Space Symbols 2026-11-01 (tray option, off by default):
+;   hold Space + a letter = a symbol (Space + J = !). Built in, so it
+;   replaces the separate SpaceSymbols.ahk - don't run both.
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -142,9 +155,10 @@ global exportPath        := A_ScriptDir . "\shortcuts_export.csv"
 global prefsPath         := A_ScriptDir . "\prefs.ini"
 global loadedLaunchers       := Map()
 global loadedExpansions      := Map()
-global registeredLaunchers   := []
+global registeredLaunchers   := Map()  ; shortcut -> opts used for registration
 global registeredExpansions  := Map()  ; shortcut -> opts used for registration
 global instantExpansions     := Map()  ; shortcuts saved with the $$ instant-fire suffix
+global instantLaunchers      := Map()  ; launchers saved with $$
 global backupFailedFile  := ""        ; set when an automatic backup failed (see SavedNotice)
 global privateTyping     := false     ; true = type expansions, never use the clipboard
 global privateTypingMenu := "Type expansions directly (no clipboard)"
@@ -162,6 +176,31 @@ global holdKeysMenu      := "Hold `; for Ctrl, hold `` for Alt"
 global holdKeysNews      := false     ; true = upgrade: show the one-time What's New
 global capsKeyOn         := false     ; Caps Lock: tap = backtick, hold = Alt (on by default)
 global capsKeyMenu       := "Caps Lock: tap = ``, hold = Alt"
+global spaceSymOn        := false     ; hold Space + letter = symbol (tray option, off by default)
+global spaceSymMenu      := "Hold Space for symbols (Space + J = !)"
+global spaceSymMs        := 250       ; how long Space is held alone before it becomes the symbol layer
+; Hold Space, then tap the letter. Order = how the list is shown.
+global spaceSymbolList := [
+    ["j", "!"],     ; right index, home row
+    ["k", "?"],     ; right middle, home row
+    ["l", "`""],    ; right ring, home row     - Literal quote
+    ["g", "("],     ; left index, reach inward - opens on the left
+    ["h", ")"],     ; right index, reach inward - closes on the right
+    ["m", "-"],     ; right index, bottom row  - minus / dash
+    ["p", "+"],     ; right pinky, top row     - plus
+    ["t", "%"],     ; left index, top row      - per-cen-T
+    ["i", ":"],     ; right middle, top row    - two stacked dots
+    ["q", "?"],     ; left pinky, top row      - second question mark
+    ["a", "@"],     ; At
+    ["e", "="],     ; Equals
+    ["d", "$"],     ; Dollar
+    ["s", "*"],     ; Star
+    ["n", "&"],     ; a-N-d
+    ["u", "_"],     ; Underscore
+    ["c", "^"],     ; Caret
+    [",", "<"],     ; the comma key - < is printed on it
+    [".", ">"]      ; the period key - > is printed on it
+]
 global mouseKeyOn        := false     ; middle mouse button in use (on by default, like ;)
 global mouseKeyMode      := "ctrl"    ; "alt"  = click types `, hold = Alt   (like Caps Lock)
                                       ; "ctrl" = click types ;, hold = Ctrl  (like the semicolon)
@@ -246,6 +285,7 @@ SafeInitialize() {
         MigratePipeSeparators()
         LoadLaunchers()
         LoadTextExpansions()
+        MigrateToInstantMarker()
         ApplyHoldKeys()
 
         ; The built-in families are registered as hotstrings via LoadTextExpansions
@@ -330,7 +370,7 @@ ShowQuickStart(firstRun := false) {
 ; Hold-key lines that match the current settings, then how to change them.
 ; Shared by the Quick Start and the one-time What's New message.
 HoldKeysIntro() {
-    global holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
+    global holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode, spaceSymOn
     msg := "CTRL AND ALT, NOW ON YOUR HOME ROW`n"
     if (holdKeysOn)
         msg .= "   SEMICOLON:  hold = Ctrl (hold `; + C = Copy),  tap = types `;`n"
@@ -351,10 +391,13 @@ HoldKeysIntro() {
         msg .= "   MIDDLE MOUSE BUTTON:  hold = Ctrl (highlight, hold, tap C = Copy),`n      click = `; (click, then v = Paste)`n"
     if (mouseKeyOn)
         msg .= "      Shift + middle click = the normal middle click.`n"
+    if (spaceSymOn)
+        msg .= "   SPACE BAR:  hold + a letter = a symbol (J = !  K = ?  A = @ ...)`n"
     msg .= "`nCHANGE ANY OF IT - right-click the tray icon:`n"
     msg .= "   Hold `; for Ctrl, hold `` for Alt  -  tick or untick`n"
     msg .= "   Caps Lock: tap = ``, hold = Alt  -  untick for the normal Caps Lock`n"
     msg .= "   Middle mouse button  -  like `; (Ctrl), like Caps Lock (Alt), or Off`n"
+    msg .= "   Hold Space for symbols  -  tick for Space + J = !, Space + A = @ ...`n"
     msg .= "   Hold Keys Timing...  -  how long a hold takes (default 200 ms)`n`n"
     return msg
 }
@@ -495,6 +538,7 @@ SetupTrayMenu() {
 
 SetupStarterTrayMenu() {
     global config, holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu, privateTyping, privateTypingMenu
+    global spaceSymOn, spaceSymMenu
     A_TrayMenu.Add("MultiShortcuts (Starter)", (*) => 0)
     A_TrayMenu.Disable("MultiShortcuts (Starter)")
     A_TrayMenu.Add()
@@ -503,6 +547,9 @@ SetupStarterTrayMenu() {
     A_TrayMenu.Add("Trigger Keys Setup...",      (*) => ShowTriggerSetup())
     A_TrayMenu.Add(holdKeysMenu,                 ToggleHoldKeys)
     A_TrayMenu.Add(capsKeyMenu,                  ToggleCapsKey)
+    A_TrayMenu.Add(spaceSymMenu,                 ToggleSpaceSymbols)
+    if (spaceSymOn)
+        A_TrayMenu.Check(spaceSymMenu)
     A_TrayMenu.Add("Middle mouse button", BuildMouseMenu())
     A_TrayMenu.Add("Hold Keys Timing...",        SetHoldKeysTime)
     if (holdKeysOn)
@@ -528,6 +575,7 @@ SetupStarterTrayMenu() {
 
 SetupFullTrayMenu() {
     global holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu, privateTyping, privateTypingMenu
+    global spaceSymOn, spaceSymMenu
     global hidePreviews, hidePreviewsMenu, allowCapture, allowCaptureMenu
     A_TrayMenu.Add("Quick Start",             (*) => ShowQuickStart())
     A_TrayMenu.Add("Show Help",               (*) => ShowHelp())
@@ -562,6 +610,9 @@ SetupFullTrayMenu() {
     A_TrayMenu.Add("Trigger Keys Setup...",     (*) => ShowTriggerSetup())
     A_TrayMenu.Add(holdKeysMenu,                ToggleHoldKeys)
     A_TrayMenu.Add(capsKeyMenu,                 ToggleCapsKey)
+    A_TrayMenu.Add(spaceSymMenu,                ToggleSpaceSymbols)
+    if (spaceSymOn)
+        A_TrayMenu.Check(spaceSymMenu)
     A_TrayMenu.Add("Middle mouse button", BuildMouseMenu())
     A_TrayMenu.Add("Hold Keys Timing...",       SetHoldKeysTime)
     if (holdKeysOn)
@@ -696,7 +747,8 @@ CheckGlobalConflict(shortcut) {
 ; Saves one shortcut. Returns true once the shortcut itself is on disk
 ; (callers keep their input window open until then). Notices show only
 ; the shortcut name - never the expansion text, which may be private.
-SaveEntry(filePath, shortcut, target, reloadFn, successTitle, successMsg) {
+; instant = true: saved with the $$ marker (fires without a space)
+SaveEntry(filePath, shortcut, target, reloadFn, successTitle, successMsg, instant := false) {
     global config, loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath
     try {
         ; True overwrite: if shortcut exists, rewrite file instead of appending
@@ -711,9 +763,15 @@ SaveEntry(filePath, shortcut, target, reloadFn, successTitle, successMsg) {
         }
         if (ownerMap != "" && ownerMap.Has(shortcut)) {
             ownerMap[shortcut] := target
+            instSet := InstantSetFor(filePath)
+            if (instant)
+                instSet[shortcut] := true
+            else if (instSet.Has(shortcut))
+                instSet.Delete(shortcut)
             ok := RewriteFile(filePath, ownerMap, ownerHeader)    ; backs up first
         } else {
-            ok := LockedFileAppend(filePath, shortcut . " " . EncodeNewlines(target) . "`n",
+            ok := LockedFileAppend(filePath, shortcut . (instant ? "$$" : "") . " "
+                                   . EncodeNewlines(target) . "`n",
                                    config["TextExpander"]["BackupOnSave"])
         }
         if (!ok) {
@@ -757,16 +815,16 @@ SaveEntry(filePath, shortcut, target, reloadFn, successTitle, successMsg) {
 }
 
 ; instSet = which names keep the $$ instant-fire marker (default: the
-; loaded expansions); passed when writing a map that isn't loaded yet
+; loaded set for that file); passed when writing a map that isn't loaded yet
 RewriteFile(filePath, dataMap, headerComment, instSet := "") {
-    global config, textExpansionPath, instantExpansions
+    global config
     if (!IsObject(instSet))
-        instSet := instantExpansions
+        instSet := InstantSetFor(filePath)
     content := headerComment . "`n"
     for shortcut, target in dataMap {
         key := shortcut
-        ; Keep the $$ instant-fire marker on expansions that had it
-        if (filePath = textExpansionPath && instSet.Has(shortcut))
+        ; Keep the $$ instant-fire marker on shortcuts that have it
+        if (instSet.Has(shortcut))
             key .= "$$"
         content .= key . " " . EncodeNewlines(target) . "`n"
     }
@@ -874,17 +932,62 @@ LockedFileAppend(filePath, content, backup := 0) {
     return true
 }
 
-PromptShortcut(prompt, title) {
-    IB := InputBox(prompt, title, "w370 h150")
-    if (IB.Result = "Cancel" || IB.Value = "")
+; Asks for a shortcut name, with the "Fire instantly" box. Returns the
+; name ("" = cancelled) and sets instant. Typing $$ at the end of the name
+; works the same as ticking the box.
+PromptShortcut(prompt, title, &instant) {
+    instant := false
+    res := {name: "", inst: false}
+    g := Gui("+AlwaysOnTop +ToolWindow", title)
+    g.SetFont("s10", "Segoe UI")
+    g.Add("Text", "x10 y10 w350", prompt)
+    ed := g.Add("Edit", "x10 y+8 w350 h24")
+    cb := InstantCheckbox(g, "x10 y+10")
+    g.Add("Button", "x10 y+12 w100 h28 Default", "OK")
+        .OnEvent("Click", (*) => (res.name := ed.Value, res.inst := cb.Value, g.Destroy()))
+    g.Add("Button", "x+10 w100 h28", "Cancel")
+        .OnEvent("Click", (*) => g.Destroy())
+    g.OnEvent("Close",  (*) => g.Destroy())
+    g.OnEvent("Escape", (*) => g.Destroy())
+    hwnd := g.Hwnd
+    g.Show("w370")
+    ed.Focus()
+    WinWaitClose("ahk_id " . hwnd)
+
+    shortcut := Trim(res.name)
+    if (shortcut = "")
         return ""
-    shortcut := Trim(IB.Value)
+    instant := StripInstantSuffix(&shortcut) || res.inst
     if (!IsValidShortcut(shortcut)) {
-        MsgBox("Invalid shortcut. Cannot be empty or contain the | character.",
+        MsgBox("Invalid shortcut. It needs at least 2 characters, with no spaces or | character.",
                "Invalid Input", "Icon!")
         return ""
     }
     return shortcut
+}
+
+; The "Fire instantly" box, the same in every window that names a shortcut
+InstantCheckbox(g, pos, checked := false) {
+    cb := g.Add("CheckBox", pos . " w350" . (checked ? " Checked" : ""),
+                "Fire &instantly - no space needed  ($$)")
+    g.Add("Text", "xp+18 y+2 w332 cGray", "Off: type the shortcut, then a space or Enter.")
+    return cb
+}
+
+; "abc$$" -> "abc", returns true. Typing $$ by hand = ticking the box, so
+; "abc" and "abc$$" are always the same shortcut, never two copies.
+StripInstantSuffix(&name) {
+    if (StrLen(name) > 2 && SubStr(name, -2) = "$$") {
+        name := RTrim(SubStr(name, 1, StrLen(name) - 2))
+        return true
+    }
+    return false
+}
+
+; The set of $$ names for a data file
+InstantSetFor(filePath) {
+    global launcherPath, instantLaunchers, instantExpansions
+    return (filePath = launcherPath) ? instantLaunchers : instantExpansions
 }
 
 ;------------------------------------------------
@@ -956,7 +1059,7 @@ AddNewLauncher() {
     global launcherPath, loadedLaunchers
     shortcut := PromptShortcut(
         "Enter shortcut trigger name:`n`nExample: 'word' to open Microsoft Word",
-        "Add App Launcher")
+        "Add App Launcher", &instant)
     if (shortcut = "")
         return
     if (!CheckGlobalConflict(shortcut))
@@ -969,14 +1072,14 @@ AddNewLauncher() {
     if (!IsAllowedTarget(selectedFile))
         return
     SaveEntry(launcherPath, shortcut, selectedFile, LoadLaunchers,
-              "App Launcher Added", "'" . shortcut . "' saved")
+              "App Launcher Added", "'" . shortcut . "' saved", instant)
 }
 
 AddDocumentLauncher() {
     global launcherPath, loadedLaunchers
     shortcut := PromptShortcut(
         "Enter shortcut name for the document:`n`nExample: 'resume'",
-        "Add Document Launcher")
+        "Add Document Launcher", &instant)
     if (shortcut = "")
         return
     if (!CheckGlobalConflict(shortcut))
@@ -988,7 +1091,7 @@ AddDocumentLauncher() {
     if (!IsAllowedTarget(selectedFile))
         return
     SaveEntry(launcherPath, shortcut, selectedFile, LoadLaunchers,
-              "Document Launcher Added", "'" . shortcut . "' saved")
+              "Document Launcher Added", "'" . shortcut . "' saved", instant)
 }
 
 ;----------------------------------------------
@@ -1208,7 +1311,7 @@ AddWebLauncher() {
     global launcherPath, loadedLaunchers
     shortcut := PromptShortcut(
         "Enter trigger name:`n`nExample: 'gmail' or 'news'",
-        "Web/Email Launcher")
+        "Web/Email Launcher", &instant)
     if (shortcut = "")
         return
     if (!CheckGlobalConflict(shortcut))
@@ -1232,14 +1335,14 @@ AddWebLauncher() {
     if (!IsAllowedTarget(target))
         return
     SaveEntry(launcherPath, shortcut, target, LoadLaunchers,
-              "Web Launcher Added", "'" . shortcut . "' saved")
+              "Web Launcher Added", "'" . shortcut . "' saved", instant)
 }
 
 AddNewExpansion() {
     global textExpansionPath, loadedExpansions
     shortcut := PromptShortcut(
         "Enter abbreviation to expand:`n`nExample: 'addr' for your address",
-        "Add Text Expansion")
+        "Add Text Expansion", &instant)
     if (shortcut = "")
         return
     if (!CheckGlobalConflict(shortcut))
@@ -1290,7 +1393,7 @@ AddNewExpansion() {
         saveBtn.Enabled := false
         ; The notice names the shortcut only - expansion text may be private
         ok := SaveEntry(textExpansionPath, shortcut, expansion, LoadTextExpansions,
-                        "Expansion Added", "'" . shortcut . "' saved")
+                        "Expansion Added", "'" . shortcut . "' saved", instant)
         if (ok) {
             gExp.Destroy()
             return
@@ -1324,7 +1427,8 @@ CaptureSelectedText() {
         msg := "Alt+C copies your selection with the other app's normal Copy.`n`n"
         msg .= "Windows clipboard history (Win+V), cloud clipboard and clipboard "
         msg .= "managers may keep a copy of it.`n`n"
-        msg .= "Don't use Alt+C for patient details or other private text - "
+        msg .= "Don't use Alt+C for confidential text (passwords, account numbers, "
+        msg .= "patient or client details) - "
         msg .= "use Alt+T and type it instead.`n`nCapture the selection now?"
         if (MsgBox(msg, "Capture Uses the Clipboard", "YesNo Icon! Default2") != "Yes")
             return
@@ -1369,16 +1473,18 @@ CaptureSelectedText() {
     previewCtrl.SetFont("s9", "Consolas")
     gCap.Add("Text", "x10 y120 w440", "Enter a shortcut trigger for this text:")
     scEdit := gCap.Add("Edit", "x10 y142 w440 h24")
-    saveBtn := gCap.Add("Button", "x10 y178 w120 h28", "Save")
+    instCb := InstantCheckbox(gCap, "x10 y174")
+    saveBtn := gCap.Add("Button", "x10 y222 w120 h28", "Save")
     saveBtn.OnEvent("Click", DoCaptureSave)
-    gCap.Add("Button", "x138 y178 w120 h28", "Cancel")
+    gCap.Add("Button", "x138 y222 w120 h28", "Cancel")
         .OnEvent("Click", (*) => gCap.Destroy())
-    gCap.Show("w460 h218")
+    gCap.Show("w460 h262")
     scEdit.Focus()
 
     DoCaptureSave(*) {
         gCap.Opt("+OwnDialogs")
         shortcut := Trim(scEdit.Value)
+        instant  := StripInstantSuffix(&shortcut) || instCb.Value
         if (shortcut = "") {
             MsgBox("Please enter a shortcut name.", "Required", "Icon!")
             return
@@ -1395,7 +1501,7 @@ CaptureSelectedText() {
         saveBtn.Enabled := false
         ; The notice names the shortcut only - captured text may be private
         if (SaveEntry(textExpansionPath, shortcut, selectedText, LoadTextExpansions,
-                      "Expansion Captured", "'" . shortcut . "' saved")) {
+                      "Expansion Captured", "'" . shortcut . "' saved", instant)) {
             gCap.Destroy()
             return
         }
@@ -1749,7 +1855,7 @@ ExportStats(rows) {
 ; EXPORT TO CSV
 ;------------------------------------------------
 ExportToCSV() {
-    global loadedLaunchers, loadedExpansions, exportPath, instantExpansions
+    global loadedLaunchers, loadedExpansions, exportPath, instantExpansions, instantLaunchers
     savePath := FileSelect("S", exportPath, "Export Shortcuts to CSV",
                            "CSV Files (*.csv)")
     if (savePath = "")
@@ -1757,7 +1863,7 @@ ExportToCSV() {
     try {
         content := "Type,Shortcut,Target/Expansion`n"
         for sc, target in loadedLaunchers
-            content .= "Launcher," . EscapeCSV(sc) . "," . EscapeCSV(target) . "`n"
+            content .= "Launcher," . EscapeCSV(sc . (instantLaunchers.Has(sc) ? "$$" : "")) . "," . EscapeCSV(target) . "`n"
         for sc, exp in loadedExpansions
             content .= "Expansion," . EscapeCSV(sc . (instantExpansions.Has(sc) ? "$$" : "")) . "," . EscapeCSV(exp) . "`n"
         ; temp file + atomic swap: an existing export is never lost
@@ -2387,13 +2493,13 @@ ShowTriggerSetup() {
 ; Returns the number of shortcuts moved, or -1 if nothing was changed
 ; (the user has been told why).
 ApplyTriggerChange(oldWin, newWin, oldApp, newApp) {
-    global loadedExpansions, loadedLaunchers, instantExpansions
+    global loadedExpansions, loadedLaunchers, instantExpansions, instantLaunchers
     global textExpansionPath, launcherPath, config
     hdrE  := "; Text Expansion file - Format: shortcut expansion"
     hdrL  := "; Launcher file - Format: shortcut target"
     pairs := [[oldWin, newWin], [oldApp, newApp]]
     expPlan := PlanPrefixMigration(loadedExpansions, pairs, instantExpansions)
-    lnPlan  := PlanPrefixMigration(loadedLaunchers, pairs, Map())
+    lnPlan  := PlanPrefixMigration(loadedLaunchers, pairs, instantLaunchers)
     ; A renamed shortcut may not land on a name that is already used - in
     ; its own file or the other one. Any clash stops the whole change, so a
     ; built-in is never quietly left behind under the old trigger key.
@@ -2427,7 +2533,7 @@ ApplyTriggerChange(oldWin, newWin, oldApp, newApp) {
         MsgBox("Couldn't update text_expansion.ahk." . notChanged, "Trigger Keys Not Changed", "Icon!")
         return -1
     }
-    if (lnPlan.count && !RewriteFile(launcherPath, lnPlan.map, hdrL)) {
+    if (lnPlan.count && !RewriteFile(launcherPath, lnPlan.map, hdrL, lnPlan.inst)) {
         RollBackTriggerFiles(expPlan.count, false)
         MsgBox("Couldn't update launchers.ahk." . notChanged, "Trigger Keys Not Changed", "Icon!")
         return -1
@@ -2670,7 +2776,7 @@ SortLV(lv, col, dataType, searchCtrl, countCtrl) {
 }
 
 EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
-    global loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath, instantExpansions
+    global loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath
     row := lv.GetNext(0, "Focused")
     if (!row)
         row := lv.GetNext()
@@ -2692,15 +2798,18 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
     editSC := gInline.Add("Edit", "x120 y10 w320 h24", oldShortcut)
     gInline.Add("Text", "x10 y44 w110", dataType = "launchers" ? "Target:" : "Expands To:")
     editVal := gInline.Add("Edit", "x120 y42 w320 h70 +Multi +WantReturn", oldTarget)
-    gInline.Add("Button", "x120 y124 w100 h28", "Save")
+    instSet := InstantSetFor(dataType = "launchers" ? launcherPath : textExpansionPath)
+    instCb  := InstantCheckbox(gInline, "x120 y120", instSet.Has(oldShortcut))
+    gInline.Add("Button", "x120 y168 w100 h28", "Save")
         .OnEvent("Click", SaveInlineEdit)
-    gInline.Add("Button", "x226 y124 w100 h28", "Cancel")
+    gInline.Add("Button", "x226 y168 w100 h28", "Cancel")
         .OnEvent("Click", (*) => gInline.Destroy())
-    gInline.Show("w460 h164")
+    gInline.Show("w490 h208")
     editSC.Focus()
 
     SaveInlineEdit(*) {
         newShortcut := Trim(editSC.Value)
+        instant     := StripInstantSuffix(&newShortcut) || instCb.Value
         ; Keep intentional leading/trailing spaces in expansions
         newTarget   := (dataType = "launchers") ? Trim(editVal.Value) : editVal.Value
         if (newShortcut = "" || Trim(newTarget) = "") {
@@ -2728,16 +2837,15 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
             if (renamed)
                 loadedLaunchers.Delete(oldShortcut)
             loadedLaunchers[newShortcut] := newTarget
+            SetInstantMark(instSet, oldShortcut, newShortcut, instant)
             ok := RewriteFile(launcherPath, loadedLaunchers, "; Launcher file - Format: shortcut target")
             LoadLaunchers()
             RefreshLauncherTab(lv, searchCtrl, countCtrl)
         } else {
-            if (renamed) {
+            if (renamed)
                 loadedExpansions.Delete(oldShortcut)
-                if (instantExpansions.Has(oldShortcut))       ; keep the $$ instant-fire marker
-                    instantExpansions[newShortcut] := true
-            }
             loadedExpansions[newShortcut] := newTarget
+            SetInstantMark(instSet, oldShortcut, newShortcut, instant)
             ok := RewriteFile(textExpansionPath, loadedExpansions, "; Text Expansion file - Format: shortcut expansion")
             LoadTextExpansions()
             RefreshExpansionTab(lv, searchCtrl, countCtrl)
@@ -2747,6 +2855,14 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
         gInline.Destroy()
         SavedNotice("Saved", newShortcut . " updated")
     }
+}
+
+; The $$ mark follows the shortcut through a rename, as the box says
+SetInstantMark(instSet, oldName, newName, instant) {
+    if (instSet.Has(oldName))
+        instSet.Delete(oldName)
+    if (instant)
+        instSet[newName] := true
 }
 
 DeleteSelectedRow(lv, dataType, parentGui, countCtrl) {
@@ -2871,13 +2987,8 @@ ShowStarterHelp() {
     title.SetFont("s12 Bold", "Segoe UI")
 
     sections := [
-        [holdKeysOn ? "HOLD KEYS  (on)" : "HOLD KEYS  (off - turn on in the tray menu)", [
-            ["hold `;",  "Ctrl + next key   (hold `; + C = copy)"],
-            ["hold ``",  "Alt + next key"],
-            ["Caps Lock", capsKeyOn  ? "tap = ``,  hold = Alt" : "normal   (option in tray menu)"],
-            ["Middle btn", !mouseKeyOn ? "normal   (change in tray menu)"
-                         : mouseKeyMode = "alt" ? "click = ``  hold = Alt  Shift = normal" : "click = `;  hold = Ctrl  Shift = normal"]
-        ]],
+        [holdKeysOn ? "HOLD KEYS  (on)" : "HOLD KEYS  (off - turn on in the tray menu)",
+         HoldKeysHelpRows()],
         ["; WINDOWS COMMANDS", [
             [wc . "c",  "Copy"],
             [wc . "x",  "Cut"],
@@ -2953,13 +3064,8 @@ ShowFullHelp() {
                         "  MultiShortcuts v2.0.1  ")
     title.SetFont("s12 Bold", "Segoe UI")
     sections := [
-        [holdKeysOn ? "HOLD KEYS  (on)" : "HOLD KEYS  (off - turn on in the tray menu)", [
-            ["hold `;",  "Ctrl + next key   (hold `; + C = copy)"],
-            ["hold ``",  "Alt + next key"],
-            ["Caps Lock", capsKeyOn  ? "tap = ``,  hold = Alt" : "normal   (option in tray menu)"],
-            ["Middle btn", !mouseKeyOn ? "normal   (change in tray menu)"
-                         : mouseKeyMode = "alt" ? "click = ``  hold = Alt  Shift = normal" : "click = `;  hold = Ctrl  Shift = normal"]
-        ]],
+        [holdKeysOn ? "HOLD KEYS  (on)" : "HOLD KEYS  (off - turn on in the tray menu)",
+         HoldKeysHelpRows()],
         ["ADD NEW SHORTCUTS", [
             [hk["AddExpansion"],        "Add Text Expansion"],
             [hk["AddLauncher"],         "Add App Launcher"],
@@ -3047,7 +3153,7 @@ ShowFullHelp() {
     tipBg := gHelp.Add("Text", "x10 y" . y . " w480 h74 BackgroundFFFDE7")
     gHelp.Add("Text", "x18 y" . (y+5) . " w468 h86 BackgroundFFFDE7 c555500",
               "TIP: Type your shortcut anywhere - it triggers automatically.`n" .
-              "     Alt+C captures selected text instantly.`n" .
+              "     Tick `"Fire instantly`" (or end a name with $$) = no space needed.`n" .
               "     Use {date:dd/MM/yyyy} or {time:h:mm tt} for custom formats.`n" .
               "     = family: r= refresh  f= fullscreen  s= save  t= new tab`n" .
               "               1-= 1 week from today  2-= 2 weeks  1m= 1 month`n" .
@@ -3075,12 +3181,13 @@ MakeLaunchCallback(t, s) {
 }
 
 LoadLaunchers() {
-    global launcherPath, loadedLaunchers, registeredLaunchers
+    global launcherPath, loadedLaunchers, registeredLaunchers, instantLaunchers
     ; This prevents leaks when a shortcut is renamed in the file
-    for sc in registeredLaunchers {
-        try Hotstring(GetHotstringOptions(sc) . sc, , "Off")
+    for sc, opts in registeredLaunchers {
+        try Hotstring(opts . sc, , "Off")
     }
-    registeredLaunchers := []
+    registeredLaunchers := Map()
+    instantLaunchers    := Map()
     loadedLaunchers.Clear()
 
     if (!FileExist(launcherPath)) {
@@ -3102,6 +3209,7 @@ LoadLaunchers() {
                 if (parts.Length >= 2) {
                     shortcut := Trim(parts[1])
                     target   := DecodeNewlines(Trim(parts[2]))
+                    instantForced := StripInstantSuffix(&shortcut)   ; $$ = fire instantly
 
                     ; A name listed twice: the first one counts (the same
                     ; rule as text expansions), so the editor and the
@@ -3116,8 +3224,11 @@ LoadLaunchers() {
                         callback := MakeLaunchCallback(target, shortcut)
 
                         try {
-                            Hotstring(GetHotstringOptions(shortcut) . shortcut, callback)
-                            registeredLaunchers.Push(shortcut)  ; Fix 4: track for clean reload
+                            opts := instantForced ? InstantOptions(shortcut) : GetHotstringOptions(shortcut)
+                            Hotstring(opts . shortcut, callback, "On")
+                            registeredLaunchers[shortcut] := opts   ; for a clean unload
+                            if (instantForced)
+                                instantLaunchers[shortcut] := true
                         } catch Error as e {
                             MsgBox("Failed to register " . shortcut . "`nError: " . e.Message, "Hotstring Error", "Icon!")
                         }
@@ -3673,19 +3784,15 @@ LoadTextExpansions() {
                     shortcut  := Trim(parts[1])
                     expansion := DecodeNewlines(parts[2])
                     ; SpeedKee compatibility: $$ suffix = instant fire
-                    instantForced := false
-                    if (SubStr(shortcut, -2) = "$$") {
-                        shortcut      := SubStr(shortcut, 1, StrLen(shortcut) - 2)
-                        instantForced := true
-                    }
+                    instantForced := StripInstantSuffix(&shortcut)
                     ; A name listed twice (e.g. "abc" and "abc$$"): the first
                     ; one counts and later ones are ignored, so a second copy
                     ; can't quietly take over
                     if (shortcut != "" && Trim(expansion) != "" && IsValidShortcut(shortcut, false)
                         && !loadedExpansions.Has(shortcut)) {
                         try {
-                            opts := instantForced ? ":*OC:" : GetHotstringOptions(shortcut)
-                            Hotstring(opts . shortcut, MakeExpansionCallback(expansion, shortcut))
+                            opts := instantForced ? InstantOptions(shortcut) : GetHotstringOptions(shortcut)
+                            Hotstring(opts . shortcut, MakeExpansionCallback(expansion, shortcut), "On")
                             loadedExpansions[shortcut] := expansion
                             registeredExpansions[shortcut] := opts  ; store opts for clean unload
                             if (instantForced)
@@ -3964,16 +4071,16 @@ InsertIntoEdit(ctrl, text) {
 ;------------------------------------------------
 ; HOTSTRING OPTIONS HELPER
 ;------------------------------------------------
-; Returns the hotstring option string for a shortcut.
-; Instant fire (:*OC:) only for:
-;   - the built-in ; and ` families (the current trigger characters)
+; Options for a shortcut WITHOUT the $$ marker.
+; Instant fire (:*OC:) happens by itself only for the built-in families:
+;   - the ; and ` families (starts with the current trigger character)
 ;   - the = family (starts or ends with =)
-;   - shortcuts ending in an uppercase letter
-;   - digits or punctuation INSIDE the shortcut (after any leading punctuation)
-;   ($$ instant-fire is handled upstream and forces :*OC: directly)
-; Leading punctuation alone (!note, #sig, .addr) does NOT force instant
-; fire - it needs a space/Enter like a plain word, so !notebook still
-; types normally. A shortcut made only of punctuation also needs one.
+; Everything else waits for a space or Enter. To make your own shortcut
+; instant, give it $$ (the "Fire instantly" box) - the same rule as
+; SpeedKee on the phone. ($$ shortcuts use InstantOptions.)
+; Every option is spelled out (* or *0, ? or ?0): when a shortcut is
+; registered again after an edit, AutoHotkey keeps any option the new
+; string leaves out - so unticking "Fire instantly" would not take effect.
 ; O = AHK's end character is suppressed (DoExpand adds the space).
 ; C = case-sensitive.
 ;------------------------------------------------
@@ -3982,18 +4089,88 @@ GetHotstringOptions(shortcut) {
     for , trig in [config["Triggers"]["WinCmd"], config["Triggers"]["AppLaunch"]] {
         if (trig != "" && StrLen(shortcut) > StrLen(trig)
             && SubStr(shortcut, 1, StrLen(trig)) == trig)
-            return ":*OC:"
+            return ":*?0OC:"
     }
     if (SubStr(shortcut, 1, 1) = "=" || SubStr(shortcut, -1) = "=")
-        return ":*OC:"
+        return ":*?0OC:"
+    return ":*0?0OC:"
+}
+
+; True for the built-in families, which are instant without $$
+IsAutoInstant(shortcut) => (GetHotstringOptions(shortcut) = ":*?0OC:")
+
+; The automatic rule before 2026-11-01 - kept only so the one-time
+; update knows which of your shortcuts used to fire instantly
+LegacyAutoInstant(shortcut) {
+    if (IsAutoInstant(shortcut))
+        return true
     if (RegExMatch(shortcut, "[A-Z]$"))
-        return ":*OC:"
-    body := RegExReplace(shortcut, "^[^a-zA-Z0-9]+")   ; ignore leading punctuation
-    if (body = "")
-        return ":OC:"                                  ; all punctuation: needs a terminator
-    if (RegExMatch(body, "[^a-zA-Z]"))
-        return ":*OC:"                                 ; digit or inner punctuation
-    return ":OC:"                                      ; plain word: needs a terminator
+        return true
+    body := RegExReplace(shortcut, "^[^a-zA-Z0-9]+")   ; leading punctuation didn't count
+    return (body != "" && RegExMatch(body, "[^a-zA-Z]"))
+}
+
+; One-time update for the $$ rule. Before, your own shortcuts with a
+; digit, an inner symbol or a capital at the end (1m, a.b, xN) fired
+; instantly by themselves. Now only $$ does that - so those shortcuts get
+; $$ once, here, and keep working exactly as before. Done when prefs.ini
+; says so; a new install has nothing to update.
+MigrateToInstantMarker() {
+    global prefsPath, loadedExpansions, loadedLaunchers
+    global instantExpansions, instantLaunchers, textExpansionPath, launcherPath
+    if (!FileExist(prefsPath))
+        return                          ; new install: nothing old to keep
+    done := "0"
+    try done := IniRead(prefsPath, "Mode", "InstantMarker", "0")
+    if (done = "1")
+        return
+    ok      := true
+    moved   := 0
+    changed := false
+    for , job in [[loadedExpansions, instantExpansions, textExpansionPath,
+                   "; Text Expansion file - Format: shortcut expansion"],
+                  [loadedLaunchers, instantLaunchers, launcherPath,
+                   "; Launcher file - Format: shortcut target"]] {
+        add := []
+        for sc in job[1]
+            if (!job[2].Has(sc) && !IsAutoInstant(sc) && LegacyAutoInstant(sc))
+                add.Push(sc)
+        if (!add.Length)
+            continue
+        for , sc in add
+            job[2][sc] := true
+        changed := true
+        if (RewriteFile(job[3], job[1], job[4]))
+            moved += add.Length
+        else
+            ok := false                 ; tried again at the next start
+    }
+    if (changed) {                      ; memory = the files on disk, success or not
+        LoadTextExpansions()
+        LoadLaunchers()
+    }
+    if (moved) {
+        ; A message box a few seconds after start-up: a tray notice would be
+        ; replaced at once by the start-up notice and never seen
+        msg := moved . " of your shortcuts fired instantly under the old rule, so they now "
+        msg .= "end in $$ and keep working exactly as before.`n`n"
+        msg .= "From now on, your own shortcuts wait for a space or Enter unless you tick "
+        msg .= "`"Fire instantly`" when you add or edit them (or end the name with $$).`n`n"
+        msg .= "The built-in `; `` and = shortcuts are instant as always."
+        SetTimer(() => MsgBox(msg, "Instant Shortcuts Updated", "Iconi"), -4000)
+    }
+    if (ok)
+        try IniWrite("1", prefsPath, "Mode", "InstantMarker")
+}
+
+; Options for a shortcut saved with the $$ instant-fire suffix.
+; A shortcut made only of symbols (!!, ??, ?!) also gets ? = "fire even
+; right after other text", so "great!!" or a symbol typed by
+; SpaceSymbols.ahk straight after a word still expands. Shortcuts with a
+; letter or digit (sig$$, addr$$) keep the word-start rule, so they never
+; fire from the middle of another word ("design", "maddr").
+InstantOptions(shortcut) {
+    return RegExMatch(shortcut, "[a-zA-Z0-9]") ? ":*?0OC:" : ":*?OC:"
 }
 
 IsValidShortcut(shortcut, showMessages := true) {
@@ -4074,6 +4251,7 @@ ToggleMacrosPause() {
 
 LoadHoldKeysPrefs() {
     global prefsPath, holdKeysOn, holdKeysMs, holdKeysNews, capsKeyOn, mouseKeyOn, mouseKeyMode
+    global spaceSymOn, spaceSymMs
     ; Hold keys start ON for everyone.
     ;   New install (no prefs.ini yet): CheckFirstRun saves the setting and
     ;   the welcome message announces it.
@@ -4116,6 +4294,11 @@ LoadHoldKeysPrefs() {
         ms := IniRead(prefsPath, "HoldKeys", "HoldMs", "200")
         if (IsInteger(ms) && ms >= 100 && ms <= 1000)
             holdKeysMs := Integer(ms)
+        ; Space Symbols: off unless ticked (not switched on for upgrades)
+        spaceSymOn := (IniRead(prefsPath, "HoldKeys", "SpaceSymbols", "0") = "1")
+        sms := IniRead(prefsPath, "HoldKeys", "SpaceMs", "250")
+        if (IsInteger(sms) && sms >= 150 && sms <= 1000)
+            spaceSymMs := Integer(sms)
     }
 }
 
@@ -4124,11 +4307,14 @@ LoadHoldKeysPrefs() {
 ; a tap (sent at SendLevel 1), while the script's own hotstrings - input
 ; level 0 - still see them, so ;c `c and the rest keep working.
 ApplyHoldKeys() {
-    global holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
+    global holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode, spaceSymOn
     state  := holdKeysOn ? "On" : "Off"
     cstate := capsKeyOn  ? "On" : "Off"
     mstate := mouseKeyOn ? "On" : "Off"
+    sstate := spaceSymOn ? "On" : "Off"
     try {
+        ; Space Symbols. No B option: Space's auto-repeat must not be saved up
+        Hotkey("*$Space", SpaceSymbolKey, sstate . " I1")
         Hotkey("*$vkBA", (*) => HoldKey("vkBA", 0xBA, "LCtrl"), state . " I1 B")
         Hotkey("*$vkC0", (*) => HoldKey("vkC0", 0xC0, "LAlt"),  state . " I1 B")
         ; Caps Lock types a backtick on a tap
@@ -4151,6 +4337,185 @@ CapsLockKey(*) {
         return
     }
     HoldKey("CapsLock", 0x14, "LAlt", "vkC0")
+}
+
+; Help rows for the hold keys (Starter and Full help share them)
+HoldKeysHelpRows() {
+    global capsKeyOn, mouseKeyOn, mouseKeyMode, spaceSymOn, spaceSymbolList
+    rows := [
+        ["hold `;",  "Ctrl + next key   (hold `; + C = copy)"],
+        ["hold ``",  "Alt + next key"],
+        ["Caps Lock", capsKeyOn  ? "tap = ``,  hold = Alt" : "normal   (option in tray menu)"],
+        ["Middle btn", !mouseKeyOn ? "normal   (change in tray menu)"
+                     : mouseKeyMode = "alt" ? "click = ``  hold = Alt  Shift = normal" : "click = `;  hold = Ctrl  Shift = normal"]
+    ]
+    if (!spaceSymOn) {
+        rows.Push(["hold Space", "normal   (symbols: option in tray menu)"])
+        return rows
+    }
+    ; Two rows: "J !   K ?   L "  ..."
+    line := ["", ""]
+    half := Ceil(spaceSymbolList.Length / 2)
+    for i, pair in spaceSymbolList
+        line[i <= half ? 1 : 2] .= StrUpper(pair[1]) . " " . pair[2] . "   "
+    rows.Push(["hold Space", RTrim(line[1])])
+    rows.Push(["  + letter", RTrim(line[2])])
+    return rows
+}
+
+; Full list for the tray tick and the Quick Start
+SpaceSymbolsText() {
+    global spaceSymbolList, spaceSymMs
+    msg := "Hold Space, then tap a letter:`n`n"
+    for i, pair in spaceSymbolList
+        msg .= "   " . StrUpper(pair[1]) . "   " . pair[2] . (Mod(i, 4) = 0 ? "`n" : "      ")
+    msg .= "`nShift works too (hold Space + Shift + J = !).`n`n"
+    msg .= "A quick tap of Space is a normal space, and typing fast is safe:`n"
+    msg .= "Space only becomes symbols after it is held alone for " . spaceSymMs . " ms.`n"
+    msg .= "Ctrl / Alt / Shift + Space work as usual. Esc lets go at once.`n`n"
+    msg .= "Symbols set off your shortcuts like typed ones: hold Space + J J = !!`n"
+    msg .= "(make a `"!!`" shortcut with Fire instantly ticked).`n`n"
+    msg .= "If you still run the separate SpaceSymbols.ahk, exit it - this replaces it."
+    return msg
+}
+
+ToggleSpaceSymbols(*) {
+    global spaceSymOn, spaceSymMenu, prefsPath
+    spaceSymOn := !spaceSymOn
+    try IniWrite(spaceSymOn ? "1" : "0", prefsPath, "HoldKeys", "SpaceSymbols")
+    ApplyHoldKeys()
+    if (spaceSymOn) {
+        A_TrayMenu.Check(spaceSymMenu)
+        MsgBox(SpaceSymbolsText(), "Space Symbols On", "Iconi")
+    } else {
+        A_TrayMenu.Uncheck(spaceSymMenu)
+        TrayTip("Space Symbols Off", "The space bar works as usual again.", "Iconi")
+    }
+}
+
+; Space bar: tap = a space, hold + letter = a symbol (spaceSymbolList).
+; Same method as HoldKey: until it's known whether Space is a tap or a
+; hold, every key is held back and queued in order, so fast typing comes
+; out exactly as typed. It runs inside this script, so its keyboard hook
+; and the shortcuts' hook are one and the same - the start-order problem
+; of the separate SpaceSymbols.ahk can't happen.
+; Safety: the keyboard is never held back for long. Esc, Ctrl, Alt or Win
+; end the layer at once; so do 2 s with no key and 8 s in all.
+SpaceSymbolKey(*) {
+    global spaceSymMs, spaceSymbolList
+    static byVk := ""
+    static IDLE_MS := 2000, MAX_MS := 8000
+    if (!IsObject(byVk)) {
+        byVk := Map()
+        for , pair in spaceSymbolList
+            byVk[GetKeyVK(pair[1])] := pair[2]
+    }
+    ; With a modifier down - physically, or logically from a hold key
+    ; (Caps Lock = Alt) - Space is just Space: Ctrl+Space, Alt+Space ...
+    ; Sent at level 1, so a Shift+Space still ends a word for shortcuts.
+    for , m in ["Ctrl", "Alt", "LWin", "RWin", "Shift"] {
+        if (GetKeyState(m, "P") || GetKeyState(m)) {
+            SendLevel(1)
+            SendEvent("{Blind}{Space}")
+            SendLevel(0)
+            KeyWait("Space", "T3")
+            return
+        }
+    }
+
+    downMods := Map()
+    q  := []                               ; [vk, sc, modifier prefix]
+    st := {stopNow: false, abort: false, lastKey: A_TickCount}
+
+    OnDown(hook, vk, sc) {
+        Critical
+        if (ModChar(vk) != "") {
+            downMods[NormalizeModVk(vk, sc)] := true
+            if (ModChar(vk) != "+")
+                st.stopNow := true         ; Ctrl/Alt/Win: a shortcut is coming
+            return
+        }
+        if (vk = 0x20)
+            return                         ; Space's own auto-repeat
+        if (vk = 0x1B) {
+            st.abort := true               ; Esc: let go now
+            return
+        }
+        st.lastKey := A_TickCount
+        q.Push([vk, sc, ModPrefix(downMods)])
+    }
+    OnUp(hook, vk, sc) {
+        Critical
+        if (ModChar(vk) != "")
+            downMods.Delete(NormalizeModVk(vk, sc))
+    }
+
+    ih := InputHook("I2")                  ; this script's own replays pass through
+    ih.KeyOpt("{All}", "NS")
+    ih.KeyOpt("{LShift}{RShift}{LCtrl}{RCtrl}{LAlt}{RAlt}{LWin}{RWin}", "-S")
+    ih.OnKeyDown := OnDown
+    ih.OnKeyUp   := OnUp
+    ih.Start()
+
+    t0        := A_TickCount
+    layer     := false     ; true once Space has been held alone long enough
+    usedLayer := false     ; a symbol was typed
+    spaceSent := false
+    try {
+        loop {
+            if (!layer) {
+                if (q.Length || st.stopNow)
+                    break                  ; a key came first: normal typing
+                if (!GetKeyState("Space", "P") || st.abort)
+                    break                  ; quick tap
+                if (A_TickCount - t0 >= spaceSymMs) {
+                    layer := true
+                    st.lastKey := A_TickCount
+                }
+            } else {
+                while (q.Length) {
+                    ev := q.RemoveAt(1)
+                    if (byVk.Has(ev[1]) && (ev[3] = "" || ev[3] = "+")) {
+                        SendLevel(1)       ; level 1: this script's shortcuts see it
+                        SendEvent("{Text}" . byVk[ev[1]])
+                        SendLevel(0)
+                        usedLayer := true
+                    } else {
+                        ; Not a symbol key (a pause, then "w"): the space
+                        ; goes first, so the order stays right
+                        if (!usedLayer && !spaceSent) {
+                            HoldKeyType("Space", "")
+                            spaceSent := true
+                        }
+                        ReplayHeldKey(ev)
+                    }
+                }
+                if (st.stopNow || st.abort || !GetKeyState("Space", "P"))
+                    break
+                if (A_TickCount - st.lastKey >= IDLE_MS || A_TickCount - t0 >= MAX_MS)
+                    break                  ; safety: never hold the keyboard back for long
+            }
+            Sleep(5)
+        }
+
+        if (!layer) {
+            ; Tap or fast typing: the space, then everything held back, in order
+            HoldKeyType("Space", "")
+            DrainHeldKeys(ih, q, st)
+        } else {
+            if (ih.InProgress)
+                ih.Stop()
+            Sleep(10)                      ; keys pressed in the last instant
+            if (!usedLayer && !spaceSent)
+                HoldKeyType("Space", "")   ; held, but no symbol: still a space
+            while (q.Length)
+                ReplayHeldKey(q.RemoveAt(1))
+        }
+    } finally {
+        if (ih.InProgress)
+            ih.Stop()                      ; never leave the keyboard held back
+    }
+    KeyWait("Space", "T3")                 ; ignore Space's auto-repeat until let go
 }
 
 ToggleCapsKey(*) {
