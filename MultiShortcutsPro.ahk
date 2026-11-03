@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.0.1 - 2026
+; MULTISHORTCUTS PRO v2.1.0 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -52,6 +52,10 @@
 ;------------------------------------------------
 ; CONFIGURATION
 ;------------------------------------------------
+; Version shown in every window title, tray tip and the tray tooltip.
+; Change it here only.
+global appVersion := "2.1.0"
+
 global config := Map(
     "Hotkeys", Map(
         "AddExpansion",        "!t",
@@ -321,13 +325,13 @@ SafeInitialize() {
         if (firstRun || justUnlocked) {
             ; the Quick Start message is on its way - no tray notice on top of it
         } else if (appMode = "full") {
-            TrayTip("MultiShortcuts v2.0.1 - Full",
+            TrayTip("MultiShortcuts v" . appVersion . " - Full",
                 "Online - " . loadedLaunchers.Count . " launchers, " .
                 loadedExpansions.Count . " expansions`nAuto-reload active", "Iconi")
         } else {
             starterMsg := "Ready! Built-in shortcuts work right away."
             starterMsg .= "`nRight-click the tray icon to learn more."
-            TrayTip("MultiShortcuts v2.0.1 - Starter", starterMsg, "Iconi")
+            TrayTip("MultiShortcuts v" . appVersion . " - Starter", starterMsg, "Iconi")
         }
     } catch Error as err {
         MsgBox("Initialization failed: " . err.Message .
@@ -632,13 +636,13 @@ SetupFullTrayMenu() {
 UpdateTrayTooltip() {
     global loadedLaunchers, loadedExpansions, appMode
     if (appMode = "starter") {
-        A_IconTip := "MultiShortcuts (Starter) v2.0.1" .
+        A_IconTip := "MultiShortcuts (Starter) v" . appVersion .
                      "`nBuilt-in trigger families active" .
                      "`nRight-click for menu - Unlock Full when ready"
         return
     }
     status   := A_IsSuspended ? "PAUSED" : "Active"
-    A_IconTip := "MultiShortcuts (Full) v2.0.1 (" . status . ")"
+    A_IconTip := "MultiShortcuts (Full) v" . appVersion . " (" . status . ")"
               . "`nLaunchers: "  . loadedLaunchers.Count
               . "   Expansions: " . loadedExpansions.Count
 }
@@ -2617,7 +2621,7 @@ PlanPrefixMigration(dataMap, pairs, instSet) {
 ; EDIT GUI
 ;------------------------------------------------
 ShowEditGUI(startTab := "launchers") {
-    gEdit := Gui("+Resize +MinSize640x460", "MultiShortcuts v2.0.1 - Manage Shortcuts")
+    gEdit := Gui("+Resize +MinSize640x460", "MultiShortcuts v" . appVersion . " - Manage Shortcuts")
     gEdit.SetFont("s10", "Segoe UI")
     gEdit.BackColor := "F5F5F5"
     tabs := gEdit.Add("Tab3", "x8 y8 w784 h460 +BackgroundF5F5F5",
@@ -2983,7 +2987,7 @@ ShowStarterHelp() {
     gHelp.SetFont("s10", "Segoe UI")
     gHelp.BackColor := "FFFFFF"
     title := gHelp.Add("Text", "x0 y0 w560 h40 +0x200 Background1A1A2E cWhite Center",
-                        "  MultiShortcuts v2.0.1 - Starter Mode  ")
+                        "  MultiShortcuts v" . appVersion . " - Starter Mode  ")
     title.SetFont("s12 Bold", "Segoe UI")
 
     sections := [
@@ -3057,11 +3061,11 @@ ShowStarterHelp() {
 ShowFullHelp() {
     global config, holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode
     hk := config["Hotkeys"]
-    gHelp := Gui("+ToolWindow", "Help - MultiShortcuts v2.0.1")
+    gHelp := Gui("+ToolWindow", "Help - MultiShortcuts v" . appVersion)
     gHelp.SetFont("s10", "Segoe UI")
     gHelp.BackColor := "FFFFFF"
     title := gHelp.Add("Text", "x0 y0 w500 h40 +0x200 Background1A1A2E cWhite Center",
-                        "  MultiShortcuts v2.0.1  ")
+                        "  MultiShortcuts v" . appVersion . "  ")
     title.SetFont("s12 Bold", "Segoe UI")
     sections := [
         [holdKeysOn ? "HOLD KEYS  (on)" : "HOLD KEYS  (off - turn on in the tray menu)",
