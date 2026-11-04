@@ -1,5 +1,53 @@
 # Changelog
 
+## v2.1.1
+
+A fix for keys and clicks that could stop working, plus two keyboard shortcuts for getting out of trouble. Your shortcuts and settings are kept.
+
+### Fixes
+- **Ctrl or Alt no longer gets stuck down after a hold.** Windows hides your keys and clicks from MultiShortcuts while a program running as administrator is in front (Task Manager, an installer, some app updaters such as Zoom's), and while the lock screen, a Windows "allow changes?" prompt or Ctrl+Alt+Del is up. If you let go of Caps Lock, `` ` ``, `;` or the middle button at that moment, MultiShortcuts never saw it, so Ctrl or Alt stayed down. Every click then became Ctrl+click or Alt+click: a link opened in a background tab, or a file click only changed the selection. Now the hold ends as soon as one of those windows comes up, and a small notice says why.
+- **Shift + middle click** can no longer leave the middle button held down in the same situation.
+- **Clicking or scrolling while holding a hold key** no longer types its character when you let go. Holding `;` to Ctrl+click files used to add a `;`.
+
+### New
+- **Ctrl+Alt+Shift+K - Key Check.** Shows whether any key or mouse button is stuck down, which program is in front, and whether other AutoHotkey scripts are running (such as a second copy of MultiShortcuts). If something is stuck, it offers to release it. Press it the moment clicks or keys act strangely. Ctrl+C copies the message.
+- **Ctrl+Alt+Shift+R - Release Stuck Keys.** Lets go of Ctrl, Alt, Shift, Win and the mouse buttons at once.
+- Both work without the mouse, in Starter and Full modes, and even while MultiShortcuts is paused. Both are also in the tray menu.
+
+## v2.1.0
+
+### New
+- **"Fire instantly" for your own shortcuts.** Every window that adds or edits a shortcut (Alt+T, Alt+A, Alt+D, Alt+W, Alt+C and the editor, Alt+E) has a **Fire instantly - no space needed ($$)** box. Ticked, the shortcut fires as soon as you finish typing it. Unticked, it waits for a Space or Enter. Typing `$$` at the end of the name does the same as ticking the box. It's the same `$$` rule SpeedKee uses on the phone, so a shortcut behaves the same on both devices.
+- **Hold Space for symbols** (tray menu, off by default). Hold the space bar and tap a letter for a symbol that's normally a Shift-stretch away:
+
+  | Key | Symbol | Key | Symbol | Key | Symbol |
+  |---|---|---|---|---|---|
+  | J | `!` | K | `?` | L | `"` |
+  | G | `(` | H | `)` | M | `-` |
+  | P | `+` | T | `%` | I | `:` |
+  | Q | `?` | A | `@` | E | `=` |
+  | D | `$` | S | `*` | N | `&` |
+  | U | `_` | C | `^` | , | `<` |
+  | . | `>` | | | | |
+
+  A quick tap of Space is a normal space, and fast typing is safe: Space only becomes the symbol key after it's held alone for a quarter second. Ctrl, Alt and Shift + Space work as usual (hold Caps Lock + Space for the window menu). Symbols set off your shortcuts just like typed ones, so hold Space + J J can fire a `!!` shortcut. Ticking the option shows the full list; Alt+H shows it too.
+
+### Changed
+- **Your own shortcuts fire instantly only with `$$`** (the Fire instantly box). Before, a shortcut with a digit or a symbol, or ending in a capital letter, fired instantly on its own. Now everything else waits for a Space or Enter, so shortcuts can't misfire inside normal words. The built-in `;`, `` ` `` and `=` families are instant as always.
+- **Nothing changes for your existing shortcuts.** On first start, v2.1.0 adds `$$` once to every shortcut of yours that fired instantly under the old rule, and tells you how many it updated.
+- **Launchers understand `$$` too**, and keep it through edits, exports and trigger-key changes.
+- The Alt+C warning now says not to capture **confidential text** (passwords, account numbers, patient or client details).
+
+### Fixes
+- **Alt no longer gets stuck** after an Alt command (Alt+T, Alt+E…) pressed by holding Caps Lock, `` ` `` or `;`. The window that opened couldn't be typed in until you tapped the real Alt key.
+- **Edit Shortcuts:** the Target and Expands To columns are always wide enough to read.
+- **Edit Shortcuts:** ticking or unticking Fire instantly takes effect at once, without a reload.
+- `abc` and `abc$$` can no longer end up as two copies of the same shortcut, one of them hidden.
+- A `{key:`, `{wait:` or `{focus:` that is never closed is typed as text, never run, and the rest of the expansion is read normally.
+- The clipboard is never left locked, even after an unexpected error while setting private text.
+- Every Ctrl, Alt, Shift and Win key is released on exit or reload, so a reload can't leave one held down.
+- The editor lists select one row at a time.
+
 ## v2.0.1
 
 A security, privacy and reliability update. Nothing changes in how the shortcuts work, and your existing shortcuts and settings are kept.

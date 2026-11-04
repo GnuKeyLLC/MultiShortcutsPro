@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.1.0 - 2026
+; MULTISHORTCUTS PRO v2.1.1 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -33,6 +33,21 @@
 ; Space Symbols 2026-11-01 (tray option, off by default):
 ;   hold Space + a letter = a symbol (Space + J = !). Built in, so it
 ;   replaces the separate SpaceSymbols.ahk - don't run both.
+; Fix 2026-11-04 (v2.1.1) - Ctrl/Alt stuck down, clicks not working:
+;   - a hold key (Caps Lock, `, ;, middle button) let go while Windows
+;     hid it from this script - a program running as administrator in
+;     front, the lock screen, a UAC prompt - was never seen as let go, so
+;     Ctrl/Alt stayed down and every click became Ctrl/Alt + click. The
+;     hold now ends there (WaitHoldRelease) and says so in a tray notice.
+;   - Shift + middle click: the same, for the middle button itself
+;   - clicking or scrolling while holding a hold key no longer types its
+;     character afterwards (hold ; + click used to add a ;)
+;   - tray menu "Release Stuck Keys" lets go of Ctrl/Alt/Shift/Win and
+;     the mouse buttons at once
+;   - two keyboard-only shortcuts, for when the mouse doesn't work:
+;       Ctrl+Alt+Shift+K  Key Check - which keys and buttons are down,
+;                         what is in front, other scripts running
+;       Ctrl+Alt+Shift+R  Release Stuck Keys
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -54,7 +69,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.1.0"
+global appVersion := "2.1.1"
 
 global config := Map(
     "Hotkeys", Map(
@@ -291,6 +306,7 @@ SafeInitialize() {
         LoadTextExpansions()
         MigrateToInstantMarker()
         ApplyHoldKeys()
+        SetupRescueHotkeys()
 
         ; The built-in families are registered as hotstrings via LoadTextExpansions
         ; and LoadLaunchers above. Those work in BOTH modes.
@@ -568,6 +584,8 @@ SetupStarterTrayMenu() {
     A_TrayMenu.Add(privateTypingMenu,          TogglePrivateTyping)
     if (privateTyping)
         A_TrayMenu.Check(privateTypingMenu)
+    A_TrayMenu.Add("Key Check (Ctrl+Alt+Shift+K)",          ShowKeyCheck)
+    A_TrayMenu.Add("Release Stuck Keys (Ctrl+Alt+Shift+R)", ReleaseStuckKeys)
     A_TrayMenu.Add("Reload Script",            (*) => Reload())
     A_TrayMenu.Add("Exit",                     (*) => ExitApp())
     A_TrayMenu.Default := "Show Built-in Shortcuts"
@@ -624,6 +642,8 @@ SetupFullTrayMenu() {
     if (capsKeyOn)
         A_TrayMenu.Check(capsKeyMenu)
     A_TrayMenu.Add("Pause/Resume (Alt+P)",    (*) => ToggleMacrosPause())
+    A_TrayMenu.Add("Key Check (Ctrl+Alt+Shift+K)",          ShowKeyCheck)
+    A_TrayMenu.Add("Release Stuck Keys (Ctrl+Alt+Shift+R)", ReleaseStuckKeys)
     A_TrayMenu.Add("Reload Script",           (*) => Reload())
     A_TrayMenu.Add("Exit",                    (*) => ExitApp())
     A_TrayMenu.Default := "Edit Shortcuts (Alt+E)"
@@ -4546,8 +4566,8 @@ MiddleButtonKey(*) {
     global mouseKeyMode
     if (GetKeyState("Shift", "P")) {
         Send("{MButton down}")       ; plain Send releases Shift for the click
-        KeyWait("MButton")
-        Send("{MButton up}")
+        try WaitHoldRelease("MButton")   ; not KeyWait: a missed "up" left it down
+        finally Send("{MButton up}")
         return
     }
     if (mouseKeyMode = "alt")
@@ -4737,14 +4757,15 @@ HoldKey(key, vkNum, modifier, tapKey := "") {
     }
 
     ; Held: act as the modifier until the key is released
-    state := {pressed: false}
+    state := {pressed: false, mouse: false}
     watch := InputHook("V")                 ; V = keys still go through
     watch.KeyOpt("{All}", "N")
     watch.OnKeyDown := (hook, vk, sc) => (vk != vkNum ? state.pressed := true : 0)
+    cut := ""
     Send("{Blind}{" . modifier . " down}")
     try {
         watch.Start()
-        KeyWait(key)
+        cut := WaitHoldRelease(key, state)  ; not KeyWait - see WaitHoldRelease
     } finally {
         ; always let go of Ctrl/Alt, even if something above failed
         try watch.Stop()
@@ -4753,10 +4774,232 @@ HoldKey(key, vkNum, modifier, tapKey := "") {
         Send("{Blind}{" . modifier . " up}")
         holdEndTick[key] := A_TickCount    ; a saved auto-repeat now is ignored
     }
-    ; Held but used for no key: a key still types its character. Not the mouse
-    ; button - its hold may have been Ctrl + scroll (zoom) or Ctrl + click.
-    if (!state.pressed && key != "MButton")
+    if (cut != "") {
+        TrayTip("Hold Key Let Go",
+                (modifier = "LAlt" ? "Alt" : "Ctrl") . " was let go because " . cut .
+                " was in front.`nWindows hides your keys from MultiShortcuts there.", "Iconi")
+        return
+    }
+    ; Held but used for no key or click: a key still types its character.
+    ; Not the mouse button - its hold may have been Ctrl + scroll or click.
+    if (!state.pressed && !state.mouse && key != "MButton")
         HoldKeyType(typed)
+}
+
+; Waits until a hold key is let go. Returns "" then, or - if it stopped
+; early - the reason, for the notice.
+;
+; Why not KeyWait: Windows doesn't show this script any keys or clicks
+; while a program running as administrator is the active window (Task
+; Manager, an installer, an admin command prompt), or while the lock
+; screen, a UAC prompt or Ctrl+Alt+Del is up. A hold key let go at such a
+; moment was never seen as let go, so KeyWait waited forever and Ctrl or
+; Alt stayed down - every later click became Ctrl+click or Alt+click (a
+; link opened in a background tab, a file click only toggled selection).
+; Ctrl/Alt sent by this script can't reach those windows anyway, so the
+; hold simply ends there.
+;
+; Also notes in state.mouse whether a mouse button was pressed or the
+; mouse used during the hold (then the key doesn't type its character).
+WaitHoldRelease(key, state := "") {
+    global mouseKeyOn
+    t0 := A_TickCount
+    loop {
+        if (!GetKeyState(key, "P"))
+            break
+        if ((why := HoldInputHidden()) != "")
+            return why
+        if (IsObject(state) && !state.mouse
+            && (GetKeyState("LButton", "P") || GetKeyState("RButton", "P")
+                || GetKeyState("XButton1", "P") || GetKeyState("XButton2", "P")))
+            state.mouse := true
+        Sleep(20)
+    }
+    ; The wheel can't be polled. With the middle button in use the mouse
+    ; hook is installed, and it times the last scroll, click or move.
+    if (IsObject(state) && mouseKeyOn && A_TimeIdleMouse < A_TickCount - t0)
+        state.mouse := true
+    return ""
+}
+
+; "" when this script can see the keyboard and mouse, otherwise what is
+; hiding them (used in the notice)
+HoldInputHidden() {
+    ; The lock screen, UAC prompts and Ctrl+Alt+Del run on another desktop,
+    ; which a normal program can't open
+    h := DllCall("OpenInputDesktop", "UInt", 0, "Int", 0, "UInt", 0x0100, "Ptr")
+    if (!h)
+        return "the lock screen or a Windows security prompt"
+    DllCall("CloseDesktop", "Ptr", h)
+    if (ActiveWindowIsElevated())
+        return "a program running as administrator"
+    return ""
+}
+
+; True if the active window's program runs with more rights than this
+; script (as administrator). Looked up once per window.
+ActiveWindowIsElevated() {
+    static lastHwnd := 0, lastResult := false, myLevel := ""
+    if (A_IsAdmin)
+        return false
+    hwnd := WinExist("A")
+    if (!hwnd)
+        return false
+    if (hwnd = lastHwnd)
+        return lastResult
+    if (myLevel = "")
+        myLevel := ProcessIntegrity(DllCall("GetCurrentProcessId", "UInt"))
+    pid := 0
+    try pid := WinGetPID("ahk_id " . hwnd)
+    if (!pid)
+        return false                        ; window just closed - ask again next time
+    level := ProcessIntegrity(pid)
+    lastHwnd   := hwnd
+    ; A program whose rights can't even be read is treated as higher
+    lastResult := (myLevel > 0) && (level < 0 || level > myLevel)
+    return lastResult
+}
+
+; Windows integrity level of a process (0x2000 = normal, 0x3000 = admin),
+; or -1 if it can't be read
+ProcessIntegrity(pid) {
+    hProc := DllCall("OpenProcess", "UInt", 0x1000, "Int", 0, "UInt", pid, "Ptr")  ; QUERY_LIMITED_INFORMATION
+    if (!hProc)
+        return -1
+    level := -1
+    hTok  := 0
+    if (DllCall("advapi32\OpenProcessToken", "Ptr", hProc, "UInt", 0x8, "Ptr*", &hTok)) {  ; TOKEN_QUERY
+        need := 0
+        DllCall("advapi32\GetTokenInformation", "Ptr", hTok, "Int", 25, "Ptr", 0, "UInt", 0, "UInt*", &need)
+        if (need) {
+            buf := Buffer(need, 0)
+            if (DllCall("advapi32\GetTokenInformation", "Ptr", hTok, "Int", 25,       ; TokenIntegrityLevel
+                        "Ptr", buf, "UInt", need, "UInt*", &need)) {
+                sid := NumGet(buf, 0, "Ptr")
+                n   := NumGet(DllCall("advapi32\GetSidSubAuthorityCount", "Ptr", sid, "Ptr"), "UChar")
+                if (n > 0)
+                    level := NumGet(DllCall("advapi32\GetSidSubAuthority", "Ptr", sid, "UInt", n - 1, "Ptr"), "UInt")
+            }
+        }
+        DllCall("CloseHandle", "Ptr", hTok)
+    }
+    DllCall("CloseHandle", "Ptr", hProc)
+    return level
+}
+
+;------------------------------------------------
+; RESCUE SHORTCUTS - keyboard only, for when clicks stop working.
+; Both modes, and exempt from Pause (S), so they always answer.
+;------------------------------------------------
+SetupRescueHotkeys() {
+    try {
+        Hotkey("^!+k", ShowKeyCheck, "S")
+        Hotkey("^!+r", ReleaseStuckKeys, "S")
+    } catch Error as err {
+        MsgBox("Could not set up Ctrl+Alt+Shift+K / R: " . err.Message, "Rescue Shortcuts", "Icon!")
+    }
+}
+
+; Key Check: what Windows and this script think is pressed right now, in
+; plain words. Press it the moment clicks stop working - it tells whether
+; MultiShortcuts is holding something down, or the problem is elsewhere
+; (another program's window). No window titles are shown, only program
+; names, so nothing private is on screen. Ctrl+C copies the text.
+ShowKeyCheck(*) {
+    ; First wait for Ctrl/Alt/Shift + K to be let go, so the shortcut's own
+    ; keys don't show up as "down"
+    for , k in ["Ctrl", "Alt", "Shift", "k", "r"]
+        KeyWait(k, "T2")
+    Sleep(50)
+
+    names := Map("LCtrl", "Left Ctrl", "RCtrl", "Right Ctrl", "LAlt", "Left Alt",
+                 "RAlt", "Right Alt", "LShift", "Left Shift", "RShift", "Right Shift",
+                 "LWin", "Left Win", "RWin", "Right Win",
+                 "LButton", "Left mouse button", "RButton", "Right mouse button",
+                 "MButton", "Middle mouse button", "XButton1", "Back mouse button",
+                 "XButton2", "Forward mouse button",
+                 "CapsLock", "Caps Lock key", "vkBA", "; key", "vkC0", "`` key",
+                 "Space", "Space bar")
+    stuck := []          ; down for Windows, but nobody is pressing it
+    held  := []          ; this script thinks you are holding it
+    for key, label in names {
+        logical  := GetKeyState(key)
+        physical := GetKeyState(key, "P")
+        if (logical && !physical)
+            stuck.Push(label)
+        else if (physical)
+            held.Push(label)
+    }
+
+    msg := ""
+    if (stuck.Length) {
+        msg .= "STUCK DOWN (Windows thinks these are pressed, but you aren't pressing them):`n"
+        for , s in stuck
+            msg .= "   " . s . "`n"
+        msg .= "-> This is MultiShortcuts or another program leaving a key down.`n`n"
+    } else {
+        msg .= "Nothing is stuck down. Ctrl, Alt, Shift, Win and the mouse buttons are all up.`n`n"
+    }
+    if (held.Length) {
+        msg .= "MultiShortcuts thinks you are still holding:`n"
+        for , h in held
+            msg .= "   " . h . "`n"
+        msg .= "(If you aren't, its `"let go`" was missed - press and release that key once.)`n`n"
+    }
+
+    ; What is in front
+    front := "(none)"
+    try front := WinGetProcessName("A")
+    msg .= "In front: " . front
+    hidden := HoldInputHidden()
+    if (hidden != "")
+        msg .= "  - " . hidden . " (Windows hides keys and clicks from MultiShortcuts here)"
+    msg .= "`n"
+
+    ; Other AutoHotkey scripts - two copies of MultiShortcuts, or the old
+    ; SpaceSymbols.ahk, fight over the same keys
+    others := []
+    myPid := DllCall("GetCurrentProcessId", "UInt")
+    DetectHiddenWindows(true)
+    for hwnd in WinGetList("ahk_class AutoHotkey") {
+        try {
+            if (WinGetPID(hwnd) = myPid)
+                continue
+            title := WinGetTitle(hwnd)
+            SplitPath(RegExReplace(title, " - AutoHotkey v[\d.]+$"), &scriptName)
+            others.Push(scriptName != "" ? scriptName : "(unknown)")
+        }
+    }
+    DetectHiddenWindows(false)
+    if (others.Length) {
+        msg .= "`nOTHER AUTOHOTKEY SCRIPTS RUNNING:`n"
+        for , o in others
+            msg .= "   " . o . "`n"
+        msg .= "Another copy of MultiShortcuts, or SpaceSymbols.ahk, can make keys misbehave - exit it.`n"
+    } else {
+        msg .= "No other AutoHotkey scripts are running.`n"
+    }
+
+    msg .= "`nVersion " . appVersion . ".  Ctrl+C copies this message."
+    if (stuck.Length) {
+        msg .= "`n`nRelease the stuck keys now?"
+        ; 4 + 48 + 0x40000 = Yes/No, warning icon, always on top
+        if (MsgBox(msg, "Key Check", 4 + 48 + 0x40000) = "Yes")
+            ReleaseStuckKeys()
+    } else {
+        MsgBox(msg, "Key Check", 64 + 0x40000)           ; info, always on top
+    }
+}
+
+; Tray menu "Release Stuck Keys": lets go of every modifier and mouse
+; button that is down only because of this script - for the rare case
+; something is still stuck. A key or button really held is left alone.
+ReleaseStuckKeys(*) {
+    ReleaseHoldModifiers()
+    for , b in ["LButton", "RButton", "MButton", "XButton1", "XButton2"]
+        if (GetKeyState(b) && !GetKeyState(b, "P"))
+            Send("{Blind}{" . b . " up}")
+    TrayTip("Keys Released", "Ctrl, Alt, Shift, Win and the mouse buttons are up.", "Iconi")
 }
 
 ; Replays held-back keys in order. The hook keeps holding back (and
