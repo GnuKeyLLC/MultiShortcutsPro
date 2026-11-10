@@ -16,14 +16,6 @@ It is on from the start, for new installs and upgrades alike, with no key remapp
 
 ---
 
-## Screenshots
-
-![MultiShortcuts Pro help screen](help-screenshot.png)
-
-![Pre-loaded shortcuts screen](preloaded-shortcuts-screenshot.png)
-
----
-
 ## Requirements
 
 - Windows 10 or Windows 11
@@ -75,13 +67,17 @@ Hold keys and the Caps Lock launcher key are on from the start (see above). To c
 
 ---
 
-## Privacy
+## What MultiShortcuts Pro does on your computer
 
-MultiShortcuts Pro runs locally on your computer.
+- **No administrator rights.** It runs with your normal Windows account and never asks for more. Running it as administrator is not needed and isn't recommended: it gives the program, and every program its launchers open, more power over your PC than it needs.
+- **No built-in networking or telemetry.** MultiShortcuts Pro itself has no networking code: no internet connection, telemetry, downloads or automatic updates. To update, you download a new version yourself. Launchers you set up can still open websites, or files and folders on network locations, through Windows and your default apps.
+- **Launchers open what you choose.** A launcher shortcut opens the website, program, document or folder you (or a file you imported) set up for it. Websites open in your normal browser. The built-in launchers open well-known sites such as claude.ai and Gmail, plus Calculator and the Snipping Tool.
+- **It watches the keyboard.** Like every AutoHotkey shortcut tool, it uses global hotkeys and AutoHotkey's keyboard hook to notice when you type a shortcut. What you type isn't saved: the undo history and usage statistics keep only shortcut names, counts and times.
+- **Your data stays on your PC.** Shortcuts, expansions and settings are stored in readable text files next to `MultiShortcutsPro.ahk` (`launchers.ahk`, `text_expansion.ahk`, `prefs.ini` and a `backups` folder). There is no account and no cloud service. If you put the folder in OneDrive, Dropbox or Google Drive, that service syncs it.
+- **Don't store secrets in it.** Because the files are readable, don't put passwords, 2FA codes, banking logins or other secrets in your shortcuts or expansions.
+- **Startup is your choice.** "Run on Windows Startup" in the tray menu adds a shortcut to your Startup folder; untick it to remove it.
 
-Your shortcuts are stored in local plain-text files. The script does not require an account, subscription, telemetry service, or cloud account.
-
-You can open the `.ahk` file in a text editor and inspect the code.
+You can open the `.ahk` file in a text editor and inspect the code. MultiShortcuts Pro runs on AutoHotkey v2, a separate free program (GPL-2.0 license) that you install yourself from autohotkey.com.
 
 ---
 

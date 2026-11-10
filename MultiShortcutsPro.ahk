@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.1.1 - 2026
+; MULTISHORTCUTS PRO v2.1.4 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -13,7 +13,11 @@
 ; Audit patch 2026-10-31:
 ;   - all modifier variants released on exit/reload (before the stats save)
 ;   - unclosed {key:/wait:/focus: tokens are typed as text, never run
-;   - editor lists are single-selection (-Multi)
+;   - editor lists were made single-selection (-Multi). Since v2.1.3
+;     they use standard multi-selection again: Ctrl+click adds or removes
+;     a row, Shift+click selects a range. Delete, Copy Selected and
+;     Export Selected use several rows; Edit, Test and double-click need
+;     exactly one.
 ;   - leading punctuation alone no longer forces instant-fire hotstrings
 ;   - clipboard is always closed (finally) when setting private text
 ; Fix 2026-11-01:
@@ -48,6 +52,20 @@
 ;       Ctrl+Alt+Shift+K  Key Check - which keys and buttons are down,
 ;                         what is in front, other scripts running
 ;       Ctrl+Alt+Shift+R  Release Stuck Keys
+; v2.1.3 (2026-11-10) - security hardening and two conveniences:
+;   - CSV import: launchers that start a program (.exe/.lnk), point to a
+;     network share, use another app's link (zoommtg: ...) or http:// need
+;     their own approval (a network path before anything checks it)
+;   - new launchers: ftp:// refused, http:// only after a clear yes
+;   - Edit Shortcuts: the Delete question belongs to the window (closing
+;     it mid-question gave an error), and the list keeps the search
+;   - Edit Shortcuts: Ctrl+click several rows to delete them at once
+;   - tray menu "Space bar": Off / hold for symbols / hold for Shift
+;     (hold Space, then a letter = a capital - same quarter-second hold)
+;   - Ctrl+Alt+Space steps through the three choices
+; v2.1.4 (2026-11-10):
+;   - Edit Shortcuts: Copy Selected (plain "shortcut expansion" lines) /
+;     Export Selected... (a CSV file in the Export to CSV format)
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -69,7 +87,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.1.1"
+global appVersion := "2.1.4"
 
 global config := Map(
     "Hotkeys", Map(
@@ -195,8 +213,12 @@ global holdKeysMenu      := "Hold `; for Ctrl, hold `` for Alt"
 global holdKeysNews      := false     ; true = upgrade: show the one-time What's New
 global capsKeyOn         := false     ; Caps Lock: tap = backtick, hold = Alt (on by default)
 global capsKeyMenu       := "Caps Lock: tap = ``, hold = Alt"
-global spaceSymOn        := false     ; hold Space + letter = symbol (tray option, off by default)
-global spaceSymMenu      := "Hold Space for symbols (Space + J = !)"
+global spaceSymOn        := false     ; hold Space does something (tray option, off by default)
+global spaceMode         := "symbols" ; what a held Space does: "symbols" (Space + J = !) or "shift" (Space + a = A)
+global spaceSubMenu      := ""        ; the tray sub-menu (rebuilt with the tray menu)
+global spaceItemOff      := "Off - normal space bar"
+global spaceItemSym      := "Hold for symbols   (Space + J = !)"
+global spaceItemShift    := "Hold for Shift   (Space + a = A)"
 global spaceSymMs        := 250       ; how long Space is held alone before it becomes the symbol layer
 ; Hold Space, then tap the letter. Order = how the list is shown.
 global spaceSymbolList := [
@@ -307,6 +329,7 @@ SafeInitialize() {
         MigrateToInstantMarker()
         ApplyHoldKeys()
         SetupRescueHotkeys()
+        SetupSpaceToggleHotkey()
 
         ; The built-in families are registered as hotstrings via LoadTextExpansions
         ; and LoadLaunchers above. Those work in BOTH modes.
@@ -390,7 +413,7 @@ ShowQuickStart(firstRun := false) {
 ; Hold-key lines that match the current settings, then how to change them.
 ; Shared by the Quick Start and the one-time What's New message.
 HoldKeysIntro() {
-    global holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode, spaceSymOn
+    global holdKeysOn, capsKeyOn, mouseKeyOn, mouseKeyMode, spaceSymOn, spaceMode
     msg := "CTRL AND ALT, NOW ON YOUR HOME ROW`n"
     if (holdKeysOn)
         msg .= "   SEMICOLON:  hold = Ctrl (hold `; + C = Copy),  tap = types `;`n"
@@ -411,13 +434,16 @@ HoldKeysIntro() {
         msg .= "   MIDDLE MOUSE BUTTON:  hold = Ctrl (highlight, hold, tap C = Copy),`n      click = `; (click, then v = Paste)`n"
     if (mouseKeyOn)
         msg .= "      Shift + middle click = the normal middle click.`n"
-    if (spaceSymOn)
+    if (spaceSymOn && spaceMode = "shift")
+        msg .= "   SPACE BAR:  hold, then a letter = a capital (works like Shift)`n"
+    else if (spaceSymOn)
         msg .= "   SPACE BAR:  hold + a letter = a symbol (J = !  K = ?  A = @ ...)`n"
     msg .= "`nCHANGE ANY OF IT - right-click the tray icon:`n"
     msg .= "   Hold `; for Ctrl, hold `` for Alt  -  tick or untick`n"
     msg .= "   Caps Lock: tap = ``, hold = Alt  -  untick for the normal Caps Lock`n"
     msg .= "   Middle mouse button  -  like `; (Ctrl), like Caps Lock (Alt), or Off`n"
-    msg .= "   Hold Space for symbols  -  tick for Space + J = !, Space + A = @ ...`n"
+    msg .= "   Space bar  -  Off, hold for symbols (Space + J = !), or hold for Shift`n"
+    msg .= "      (or press Ctrl+Alt+Space to step through them)`n"
     msg .= "   Hold Keys Timing...  -  how long a hold takes (default 200 ms)`n`n"
     return msg
 }
@@ -558,7 +584,6 @@ SetupTrayMenu() {
 
 SetupStarterTrayMenu() {
     global config, holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu, privateTyping, privateTypingMenu
-    global spaceSymOn, spaceSymMenu
     A_TrayMenu.Add("MultiShortcuts (Starter)", (*) => 0)
     A_TrayMenu.Disable("MultiShortcuts (Starter)")
     A_TrayMenu.Add()
@@ -567,9 +592,7 @@ SetupStarterTrayMenu() {
     A_TrayMenu.Add("Trigger Keys Setup...",      (*) => ShowTriggerSetup())
     A_TrayMenu.Add(holdKeysMenu,                 ToggleHoldKeys)
     A_TrayMenu.Add(capsKeyMenu,                  ToggleCapsKey)
-    A_TrayMenu.Add(spaceSymMenu,                 ToggleSpaceSymbols)
-    if (spaceSymOn)
-        A_TrayMenu.Check(spaceSymMenu)
+    A_TrayMenu.Add("Space bar  (Ctrl+Alt+Space)", BuildSpaceMenu())
     A_TrayMenu.Add("Middle mouse button", BuildMouseMenu())
     A_TrayMenu.Add("Hold Keys Timing...",        SetHoldKeysTime)
     if (holdKeysOn)
@@ -597,7 +620,6 @@ SetupStarterTrayMenu() {
 
 SetupFullTrayMenu() {
     global holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu, privateTyping, privateTypingMenu
-    global spaceSymOn, spaceSymMenu
     global hidePreviews, hidePreviewsMenu, allowCapture, allowCaptureMenu
     A_TrayMenu.Add("Quick Start",             (*) => ShowQuickStart())
     A_TrayMenu.Add("Show Help",               (*) => ShowHelp())
@@ -632,9 +654,7 @@ SetupFullTrayMenu() {
     A_TrayMenu.Add("Trigger Keys Setup...",     (*) => ShowTriggerSetup())
     A_TrayMenu.Add(holdKeysMenu,                ToggleHoldKeys)
     A_TrayMenu.Add(capsKeyMenu,                 ToggleCapsKey)
-    A_TrayMenu.Add(spaceSymMenu,                ToggleSpaceSymbols)
-    if (spaceSymOn)
-        A_TrayMenu.Check(spaceSymMenu)
+    A_TrayMenu.Add("Space bar  (Ctrl+Alt+Space)", BuildSpaceMenu())
     A_TrayMenu.Add("Middle mouse button", BuildMouseMenu())
     A_TrayMenu.Add("Hold Keys Timing...",       SetHoldKeysTime)
     if (holdKeysOn)
@@ -1159,7 +1179,10 @@ SplitTarget(t, &path, &args) {
 ; "launch"). Launchers are checked again every time they fire, so a target
 ; written into launchers.ahk by anything other than this script (a sync
 ; conflict, another program, a hand edit) is still checked.
-IsAllowedTarget(target, action := "add", depth := 0) {
+; keepScheme: "http" = the caller already had the user approve an http://
+; address; "existing" = the target is already saved and unchanged (a rename
+; in Edit Shortcuts), so older http:// and ftp:// launchers keep working.
+IsAllowedTarget(target, action := "add", depth := 0, keepScheme := "") {
     global config
     raw     := Trim(target)
     cleaned := StrLower(raw)
@@ -1176,8 +1199,31 @@ IsAllowedTarget(target, action := "add", depth := 0) {
         return false
     }
 
+    ; ftp:// isn't used by any feature and is unencrypted: refused for new
+    ; and imported launchers. One that is already saved still works.
+    if (RegExMatch(cleaned, "^ftp://")) {
+        if (action = "launch" || keepScheme = "existing")
+            return true
+        MsgBox("ftp:// links are not permitted for new launchers - they are not encrypted.`n" .
+               "Use an https:// address instead.`n`n" . raw,
+               "Security Block", "Icon!")
+        return false
+    }
+
+    ; http:// is not encrypted: a new launcher needs a clear yes first.
+    ; (Imports ask in ReviewImportedLauncher; saved ones keep working.)
+    if (RegExMatch(cleaned, "^http://")) {
+        if (action = "add" && keepScheme = ""
+            && MsgBox("This address uses http://, so the connection is not encrypted - " .
+                      "what you send or see there could be read or changed on the way.`n`n" .
+                      raw . "`n`nUse an https:// address if the site has one. Add it anyway?",
+                      "Unencrypted Link", "YesNo Icon! Default2") != "Yes")
+            return false
+        return true
+    }
+
     ; Web and email links open in the browser / mail client
-    if (RegExMatch(cleaned, "^(https?://|mailto:|ftp://)"))
+    if (RegExMatch(cleaned, "^(https://|mailto:)"))
         return true
 
     ; Protocol handlers such as ms-screenclip:  (two or more letters, so a
@@ -1287,7 +1333,7 @@ IsAllowedTarget(target, action := "add", depth := 0) {
                       "Shortcut With Extra Instructions", "YesNo Icon!") != "Yes")
             return false
         if (StrLower(lnkTarget) != StrLower(path))
-            return IsAllowedTarget(lnkTarget, action, depth + 1)
+            return IsAllowedTarget(lnkTarget, action, depth + 1, keepScheme)
         return true
     }
 
@@ -1348,15 +1394,23 @@ AddWebLauncher() {
     target := Trim(I2.Value)
     if (InStr(target, "@") && !InStr(target, "://") && !InStr(target, "mailto:"))
         target := "mailto:" . target
-    ; Warn if user adds plain HTTP instead of HTTPS
-    if (RegExMatch(target, "^http://")) {
-        result := MsgBox("This URL uses HTTP which is not secure.`n`n" .
-                         "Would you like to use HTTPS instead?",
-                         "Security Warning", "YesNo Icon!")
+    ; Plain HTTP is unencrypted: offer HTTPS, and keep HTTP only on a clear "No"
+    keep := ""
+    if (RegExMatch(target, "i)^http://")) {
+        result := MsgBox("This address uses http://, so the connection is not encrypted.`n`n" .
+                         target . "`n`n" .
+                         "Yes = use https:// instead (recommended)`n" .
+                         "No = keep http:// (unencrypted)`n" .
+                         "Cancel = don't add it",
+                         "Unencrypted Link", "YesNoCancel Icon!")
+        if (result = "Cancel")
+            return
         if (result = "Yes")
             target := "https://" . SubStr(target, 8)
+        else
+            keep := "http"          ; approved just now - don't ask twice
     }
-    if (!IsAllowedTarget(target))
+    if (!IsAllowedTarget(target, "add", 0, keep))
         return
     SaveEntry(launcherPath, shortcut, target, LoadLaunchers,
               "Web Launcher Added", "'" . shortcut . "' saved", instant)
@@ -1402,7 +1456,11 @@ AddNewExpansion() {
                                         "Preview", "Iconi"))
     gExp.Add("Button", "x246 y338 w110 h28", "Cancel")
         .OnEvent("Click", (*) => gExp.Destroy())
-    gExp.Show("w480 h380")
+    ; About storage on disk only - expanding itself keeps its privacy protections
+    gExp.Add("Text", "x10 y374 w460 cGray",
+        "Note: shortcuts are saved on this PC as readable text. Don't store passwords, " .
+        "2FA codes, banking logins or other secrets in them.")
+    gExp.Show("w480 h416")
     editVal.Focus()
 
     DoSave(*) {
@@ -1997,7 +2055,9 @@ ImportFromCSV() {
     ; Warn user about trusted sources before importing
     result := MsgBox("Only import shortcut files from sources you trust.`n`n" .
                      "Imported expansions may send keystrokes, use clipboard content,`n" .
-                     "or activate windows on your computer.`n`nContinue with import?",
+                     "or activate windows on your computer. Imported launchers that start`n" .
+                     "a program or open another app's link are shown to you one by one.`n`n" .
+                     "Continue with import?",
                      "Import Warning", "YesNo Icon!")
     if (result != "Yes")
         return
@@ -2061,6 +2121,47 @@ ImportFromCSV() {
         }
     }
 
+    ; ── Launcher review. An imported launcher that starts a program (.exe),
+    ; opens a Windows shortcut (.lnk), points to a network share, hands a
+    ; link to another app (zoommtg:, steam: ...) or uses unencrypted
+    ; http:// is only added after it is
+    ; approved on its own, showing exactly what it opens. This gate exists so
+    ; a shortcut file from elsewhere can never silently add something that
+    ; launches a program or a protocol handler. It comes on top of
+    ; IsAllowedTarget, never instead of it.
+    lnCount := 0
+    lnSeen  := Map()
+    for i, f in records {
+        if (IsBlankCSVRecord(f) || (i = 1 && IsCSVHeader(f)))
+            continue
+        if (f.Length < 3 || Trim(f[1]) != "Launcher")
+            continue
+        sc   := UnescapeCSVValue(Trim(f[2]))
+        base := RegExReplace(sc, "\$\$$")
+        if (!IsValidShortcut(sc, false) || !IsValidShortcut(base, false) || lnSeen.Has(base)
+            || loadedLaunchers.Has(base) || loadedExpansions.Has(base))
+            continue
+        lnSeen[base] := true
+        lnTgt := Trim(UnescapeCSVValue(f[3]))
+        ; ftp:// is refused outright later, so it isn't one to review
+        if (ImportLauncherKind(lnTgt, &kp, &ka) != "" && !RegExMatch(StrLower(lnTgt), "^ftp://"))
+            lnCount++
+    }
+    ln := {mode: "review", n: 0, skip: 0}   ; mode: "review" each one, or "skip" them all
+    if (lnCount > 0) {
+        warn := lnCount . " launcher(s) in this file start a program (.exe), open a Windows "
+        warn .= "shortcut (.lnk), point to another computer or network share, hand a link "
+        warn .= "to another app (such as zoommtg: or steam:) or use an unencrypted http:// link.`n`n"
+        warn .= "Yes = show me each one, and I'll decide one by one`n"
+        warn .= "No = skip all of them (import the other shortcuts)`n"
+        warn .= "Cancel = stop the import"
+        choice := MsgBox(warn, "Launchers That Start Programs", "YesNoCancel Icon! Default2")
+        if (choice = "Cancel")
+            return
+        if (choice = "No")
+            ln.mode := "skip"
+    }
+
     imported := 0
     skipped  := 0
     dupes    := 0
@@ -2098,7 +2199,17 @@ ImportFromCSV() {
             continue
         }
         if (type = "Launcher") {
+            ; Approval gate (see "Launcher review" above) - nothing that can
+            ; start a program or open another app's link is added without it.
+            ; A network path is approved BEFORE IsAllowedTarget, because
+            ; checking it already makes Windows connect to that computer.
+            kind := ImportLauncherKind(val, &kPath, &kArgs)
+            if (kind = "network" && !ImportLauncherApproved(ln, base, kind, val, kPath, kArgs))
+                continue
             if (IsAllowedTarget(val, "import")) {
+                if (kind != "" && kind != "network"
+                    && !ImportLauncherApproved(ln, base, kind, val, kPath, kArgs))
+                    continue
                 addL .= sc . " " . EncodeNewlines(val) . "`n"
                 seen[base] := true
                 nL++
@@ -2134,6 +2245,7 @@ ImportFromCSV() {
     MsgBox("Import complete.`n`nImported: " . imported .
            "`nSkipped: " . skipped .
            (autoSkip > 0 ? "`nPress keys / switch windows / pause, not approved: " . autoSkip : "") .
+           (ln.skip > 0 ? "`nLaunchers that start programs or open links, not approved: " . ln.skip : "") .
            (dupes > 0 ? "`nListed twice in the file (only the first kept): " . dupes : "") .
            (skipped > 0 ? "`n`n(Existing shortcuts are never overwritten by an import.)" : ""),
            "Import Results", "Iconi")
@@ -2170,6 +2282,105 @@ ReviewImportedShortcut(n, total, sc, acts, txt) {
     g.OnEvent("Escape", (*) => (res.v := "skip", g.Destroy()))
     hwnd := g.Hwnd
     g.Show("w640 h496")
+    WinWaitClose("ahk_id " . hwnd)
+    return res.v
+}
+
+; Which imported launchers need their own approval (see ImportFromCSV):
+;   "exe" program, "lnk" Windows shortcut, "network" a \\computer\share
+;   path, "protocol" another app's link (zoommtg:, steam: ...), "http"
+;   unencrypted web link. "" = no approval needed (https://, mailto:, a
+;   local document or folder). Uses the same tests as IsAllowedTarget and
+;   LaunchTarget. path/args are set for exe/lnk. A network path is
+;   recognised by its text alone - nothing on the network is touched.
+ImportLauncherKind(val, &path, &args) {
+    path := ""
+    args := ""
+    low  := StrLower(Trim(val))
+    if (RegExMatch(low, "^(https://|mailto:)"))
+        return ""
+    if (RegExMatch(low, "^http://"))
+        return "http"
+    if (RegExMatch(low, "^[a-z][a-z0-9+.\-]+:"))
+        return "protocol"
+    if (RegExMatch(low, '^"?[\\/]{2}'))
+        return "network"
+    SplitTarget(Trim(val), &path, &args)
+    if (DirExist(path))
+        return ""
+    SplitPath(path, , , &ext)
+    ext := StrLower(ext)
+    return (ext = "exe" || ext = "lnk") ? ext : ""
+}
+
+; One approval for ImportFromCSV. ln = {mode, n, skip}: once "Skip this
+; and all the rest" (or "No" in the summary) is chosen, the rest are skipped
+; without asking. Returns true only for "Import this one".
+ImportLauncherApproved(ln, name, kind, val, path, args) {
+    ans := "skip"
+    if (ln.mode = "review") {
+        ln.n++
+        ans := ReviewImportedLauncher(ln.n, name, kind, val, path, args)
+        if (ans = "stop")
+            ln.mode := "skip"
+    }
+    if (ans = "import")
+        return true
+    ln.skip++
+    return false
+}
+
+; Approval window for one imported launcher that can start a program or
+; hand a link to another app. Shows the full path, what a .lnk really opens
+; and any extra instructions. Skip is the default (Enter, Esc and closing
+; the window all skip). Returns "import", "skip" or "stop".
+ReviewImportedLauncher(n, sc, kind, target, path, args) {
+    lines := ""
+    if (kind = "exe") {
+        what  := "This imported shortcut can LAUNCH A PROGRAM on your PC when you type it."
+        lines .= "Program:`r`n   " . path . "`r`n"
+        lines .= "Extra instructions:`r`n   " . (args != "" ? args : "(none)") . "`r`n"
+    } else if (kind = "lnk") {
+        what  := "This imported shortcut opens a Windows shortcut (.lnk), which can LAUNCH A PROGRAM."
+        lnkTarget := "", lnkArgs := ""
+        try FileGetShortcut(path, &lnkTarget, , &lnkArgs)
+        lines .= ".lnk file:`r`n   " . path . "`r`n"
+        lines .= "It opens:`r`n   " . (lnkTarget != "" ? lnkTarget : "(Windows can't tell)") . "`r`n"
+        lines .= "Its extra instructions:`r`n   " . (lnkArgs != "" ? lnkArgs : "(none)") . "`r`n"
+        if (args != "")
+            lines .= "Launcher's extra instructions:`r`n   " . args . "`r`n"
+    } else if (kind = "network") {
+        what  := "This imported shortcut points to ANOTHER COMPUTER or network share. Checking or "
+        what  .= "opening it connects to that computer, and it may LAUNCH A PROGRAM."
+        lines .= "Target:`r`n   " . target . "`r`n"
+    } else if (kind = "http") {
+        what  := "This imported shortcut opens an http:// link. The connection is NOT encrypted."
+        lines .= "Address:`r`n   " . target . "`r`n"
+    } else {
+        scheme := RegExMatch(target, "^[A-Za-z][A-Za-z0-9+.\-]+:", &pm) ? pm[0] : "custom"
+        what  := "This imported shortcut hands a '" . scheme . "' link to another program on your PC, "
+        what  .= "which may START that program."
+        lines .= "Link:`r`n   " . target . "`r`n"
+    }
+    res := {v: "skip"}
+    g := Gui("+AlwaysOnTop", "Review Imported Launcher " . n)
+    g.SetFont("s10", "Segoe UI")
+    g.Add("Text", "x10 y10 w620", "Shortcut:   " . sc)
+    g.Add("Text", "x10 y36 w620 h40", what)
+    ed := g.Add("Edit", "x10 y80 w620 h170 ReadOnly Multi VScroll", RTrim(lines, "`r`n"))
+    ed.SetFont("s9", "Consolas")
+    g.Add("Text", "x10 y258 w620 cGray",
+          "Only import it if you recognize it and trust where the file came from.")
+    g.Add("Button", "x10 y284 w160 h30", "&Import this one")
+        .OnEvent("Click", (*) => (res.v := "import", g.Destroy()))
+    g.Add("Button", "x180 y284 w160 h30 Default", "&Skip it")
+        .OnEvent("Click", (*) => (res.v := "skip", g.Destroy()))
+    g.Add("Button", "x350 y284 w200 h30", "Skip this and &all the rest")
+        .OnEvent("Click", (*) => (res.v := "stop", g.Destroy()))
+    g.OnEvent("Close",  (*) => (res.v := "skip", g.Destroy()))
+    g.OnEvent("Escape", (*) => (res.v := "skip", g.Destroy()))
+    hwnd := g.Hwnd
+    g.Show("w640 h326")
     WinWaitClose("ahk_id " . hwnd)
     return res.v
 }
@@ -2654,23 +2865,30 @@ ShowEditGUI(startTab := "launchers") {
     gEdit.Add("Button", "x346 y46 w24 h24", "X")
         .OnEvent("Click", (*) => (searchL.Value := "", RefreshLauncherTab(lvL, searchL, countL)))
     countL := gEdit.Add("Text", "x380 y48 w390 h20 +Right cGray vCountL", "")
-    ; -Multi: one row at a time until batch delete is supported
-    lvL := gEdit.Add("ListView", "x18 y76 w764 h320 Grid -Multi +LV0x10000 vLvL",
+    ; Standard multi-selection (no -Multi): Ctrl+click adds or removes a
+    ; row, Shift+click selects a range. Delete, Copy Selected and Export
+    ; Selected take every selected row (SelectedRows); Edit, Test and
+    ; double-click need one (PickOneRow).
+    lvL := gEdit.Add("ListView", "x18 y76 w764 h320 Grid +LV0x10000 vLvL",
                      ["Shortcut", "Target", "Type"])
     ; Fixed widths: "Auto" here would size the columns to an empty list
     ; (rows are added later), leaving the Target column too narrow to read
     lvL.ModifyCol(1, 160)
     lvL.ModifyCol(2, 480)
     lvL.ModifyCol(3, 100)
-    gEdit.Add("Button", "x18  y406 w110 h26", "&Edit")
+    gEdit.Add("Button", "x18  y406 w96 h26", "&Edit")
         .OnEvent("Click", (*) => EditSelectedRow(lvL, "launchers", gEdit, searchL, countL))
-    gEdit.Add("Button", "x134 y406 w110 h26", "&Delete")
-        .OnEvent("Click", (*) => DeleteSelectedRow(lvL, "launchers", gEdit, countL))
-    gEdit.Add("Button", "x250 y406 w110 h26", "&Add New")
+    gEdit.Add("Button", "x120 y406 w96 h26", "&Delete")
+        .OnEvent("Click", (*) => DeleteSelectedRow(lvL, "launchers", gEdit, countL, searchL))
+    gEdit.Add("Button", "x222 y406 w96 h26", "&Add New")
         .OnEvent("Click", (*) => (gEdit.Hide(), AddNewLauncher(), gEdit.Show(),
                                    RefreshLauncherTab(lvL, searchL, countL)))
-    gEdit.Add("Button", "x366 y406 w110 h26", "&Test")
+    gEdit.Add("Button", "x324 y406 w96 h26", "&Test")
         .OnEvent("Click", (*) => TestSelectedRow(lvL, "launchers"))
+    gEdit.Add("Button", "x426 y406 w112 h26", "Copy Selected")
+        .OnEvent("Click", (*) => CopySelectedRows(lvL, "launchers", gEdit))
+    gEdit.Add("Button", "x544 y406 w118 h26", "Export Selected...")
+        .OnEvent("Click", (*) => ExportSelectedRows(lvL, "launchers", gEdit))
     gEdit.Add("Button", "x668 y406 w114 h26", "&Reload")
         .OnEvent("Click", (*) => RefreshLauncherTab(lvL, searchL, countL))
     lvL.OnEvent("DoubleClick", (*) => EditSelectedRow(lvL, "launchers", gEdit, searchL, countL))
@@ -2684,21 +2902,25 @@ ShowEditGUI(startTab := "launchers") {
     gEdit.Add("Button", "x346 y46 w24 h24", "X")
         .OnEvent("Click", (*) => (searchE.Value := "", RefreshExpansionTab(lvE, searchE, countE)))
     countE := gEdit.Add("Text", "x380 y48 w390 h20 +Right cGray vCountE", "")
-    ; -Multi: one row at a time until batch delete is supported
-    lvE := gEdit.Add("ListView", "x18 y76 w764 h320 Grid -Multi +LV0x10000 vLvE",
+    ; Same selection rules as the Launchers list above
+    lvE := gEdit.Add("ListView", "x18 y76 w764 h320 Grid +LV0x10000 vLvE",
                      ["Shortcut", "Expands To"])
     ; Fixed widths, so "Expands To" is always wide enough to read
     lvE.ModifyCol(1, 160)
     lvE.ModifyCol(2, 580)
-    gEdit.Add("Button", "x18  y406 w110 h26", "&Edit")
+    gEdit.Add("Button", "x18  y406 w96 h26", "&Edit")
         .OnEvent("Click", (*) => EditSelectedRow(lvE, "expansions", gEdit, searchE, countE))
-    gEdit.Add("Button", "x134 y406 w110 h26", "&Delete")
-        .OnEvent("Click", (*) => DeleteSelectedRow(lvE, "expansions", gEdit, countE))
-    gEdit.Add("Button", "x250 y406 w110 h26", "&Add New")
+    gEdit.Add("Button", "x120 y406 w96 h26", "&Delete")
+        .OnEvent("Click", (*) => DeleteSelectedRow(lvE, "expansions", gEdit, countE, searchE))
+    gEdit.Add("Button", "x222 y406 w96 h26", "&Add New")
         .OnEvent("Click", (*) => (gEdit.Hide(), AddNewExpansion(), gEdit.Show(),
                                    RefreshExpansionTab(lvE, searchE, countE)))
-    gEdit.Add("Button", "x366 y406 w110 h26", "&Test")
+    gEdit.Add("Button", "x324 y406 w96 h26", "&Test")
         .OnEvent("Click", (*) => TestSelectedRow(lvE, "expansions"))
+    gEdit.Add("Button", "x426 y406 w112 h26", "Copy Selected")
+        .OnEvent("Click", (*) => CopySelectedRows(lvE, "expansions", gEdit))
+    gEdit.Add("Button", "x544 y406 w118 h26", "Export Selected...")
+        .OnEvent("Click", (*) => ExportSelectedRows(lvE, "expansions", gEdit))
     gEdit.Add("Button", "x668 y406 w114 h26", "&Reload")
         .OnEvent("Click", (*) => RefreshExpansionTab(lvE, searchE, countE))
     lvE.OnEvent("DoubleClick", (*) => EditSelectedRow(lvE, "expansions", gEdit, searchE, countE))
@@ -2707,7 +2929,7 @@ ShowEditGUI(startTab := "launchers") {
 
     tabs.UseTab()
     gEdit.Add("Text", "x8 y474 w784 h20 BackgroundE0E0E0 c444444",
-              "  Double-click a row to edit   |   Click column header to sort")
+              "  Double-click a row to edit   |   Ctrl+click or Shift+click to select several   |   Click column header to sort")
 
     RefreshLauncherTab(lvL, searchL, countL)
     RefreshExpansionTab(lvE, searchE, countE)
@@ -2718,8 +2940,19 @@ ShowEditGUI(startTab := "launchers") {
     gEdit.Show("w800 h500")
 }
 
+; False once the Edit Shortcuts window has been closed
+CtrlAlive(ctrl) {
+    try {
+        return ctrl.Hwnd != 0
+    } catch {
+        return false
+    }
+}
+
 RefreshLauncherTab(lv, search, countCtrl) {
     global loadedLaunchers
+    if (!CtrlAlive(lv))
+        return               ; the window was closed - nothing to refresh
     if (loadedLaunchers.Count = 0)
         LoadLaunchers()
     n := PopulateLauncherList(lv, search.Value)
@@ -2729,6 +2962,8 @@ RefreshLauncherTab(lv, search, countCtrl) {
 
 RefreshExpansionTab(lv, search, countCtrl) {
     global loadedExpansions
+    if (!CtrlAlive(lv))
+        return               ; the window was closed - nothing to refresh
     if (loadedExpansions.Count = 0)
         LoadTextExpansions()
     n := PopulateExpansionList(lv, search.Value)
@@ -2801,13 +3036,9 @@ SortLV(lv, col, dataType, searchCtrl, countCtrl) {
 
 EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
     global loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath
-    row := lv.GetNext(0, "Focused")
+    row := PickOneRow(lv, "edit")
     if (!row)
-        row := lv.GetNext()
-    if (!row) {
-        MsgBox("Please select a row to edit.", "Nothing Selected", "Iconi")
         return
-    }
     oldShortcut := lv.GetText(row, 1)
     ; The list shows multi-line expansions with " <- " in place of line
     ; breaks - edit the stored value, not the display copy.
@@ -2856,7 +3087,8 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
             return
         }
         if (dataType = "launchers") {
-            if (!IsAllowedTarget(newTarget))
+            ; An unchanged target (rename only) keeps an older http:// / ftp:// link
+            if (!IsAllowedTarget(newTarget, "add", 0, (newTarget == Trim(oldTarget)) ? "existing" : ""))
                 return
             if (renamed)
                 loadedLaunchers.Delete(oldShortcut)
@@ -2889,44 +3121,177 @@ SetInstantMark(instSet, oldName, newName, instant) {
         instSet[newName] := true
 }
 
-DeleteSelectedRow(lv, dataType, parentGui, countCtrl) {
+DeleteSelectedRow(lv, dataType, parentGui, countCtrl, searchCtrl := "") {
     global loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath
-    row := lv.GetNext(0, "Focused")
-    if (!row)
-        row := lv.GetNext()
-    if (!row) {
+    ; The question belongs to the Edit Shortcuts window, so that window
+    ; can't be closed (or Delete clicked again) while it is waiting
+    parentGui.Opt("+OwnDialogs")
+    ; After the delete, the list keeps the current search
+    search := IsObject(searchCtrl) ? searchCtrl : {Value: ""}
+    names := []
+    for , row in SelectedRows(lv)
+        names.Push(lv.GetText(row, 1))
+    if (names.Length = 0) {
         MsgBox("Please select a row to delete.", "Nothing Selected", "Iconi")
         return
     }
-    shortcut := lv.GetText(row, 1)
-    if (MsgBox("Delete '" . shortcut . "'?`n`nThis cannot be undone.",
-               "Confirm Delete", "YesNo Icon!") != "Yes")
+    if (names.Length = 1) {
+        question := "Delete '" . names[1] . "'?"
+    } else {
+        ; Every name is listed (up to 15), so nothing is deleted unseen
+        question := "Delete these " . names.Length . " shortcuts?`n"
+        for i, n in names {
+            if (i > 15) {
+                question .= "`n   ...and " . (names.Length - 15) . " more"
+                break
+            }
+            question .= "`n   " . n
+        }
+    }
+    ; One shortcut: asked as before. Several: No is the default button
+    if (MsgBox(question . "`n`nThis cannot be undone.", "Confirm Delete",
+               names.Length > 1 ? "YesNo Icon! Default2" : "YesNo Icon!") != "Yes")
         return
+    ; All of them in one safe file replace
+    dataMap := (dataType = "launchers") ? loadedLaunchers : loadedExpansions
+    for , n in names
+        if (dataMap.Has(n))
+            dataMap.Delete(n)
     if (dataType = "launchers") {
-        loadedLaunchers.Delete(shortcut)
         ok := RewriteFile(launcherPath, loadedLaunchers, "; Launcher file - Format: shortcut target")
         LoadLaunchers()
-        RefreshLauncherTab(lv, {Value:""}, countCtrl)
+        RefreshLauncherTab(lv, search, countCtrl)
     } else {
-        loadedExpansions.Delete(shortcut)
         ok := RewriteFile(textExpansionPath, loadedExpansions, "; Text Expansion file - Format: shortcut expansion")
         LoadTextExpansions()
-        RefreshExpansionTab(lv, {Value:""}, countCtrl)
+        RefreshExpansionTab(lv, search, countCtrl)
     }
     if (!ok)
         return
-    SavedNotice("Deleted", "'" . shortcut . "' removed")
+    SavedNotice("Deleted", names.Length = 1 ? "'" . names[1] . "' removed"
+                                            : names.Length . " shortcuts removed")
+}
+
+; Row numbers of every selected row, top to bottom
+SelectedRows(lv) {
+    rows := []
+    row  := 0
+    while (row := lv.GetNext(row))
+        rows.Push(row)
+    return rows
+}
+
+; The one selected row for Edit / Test, or 0 (after saying why)
+PickOneRow(lv, what) {
+    rows := SelectedRows(lv)
+    if (rows.Length = 0) {
+        MsgBox("Please select a row to " . what . ".", "Nothing Selected", "Iconi")
+        return 0
+    }
+    if (rows.Length > 1) {
+        MsgBox(rows.Length . " shortcuts are selected. Select just one to " . what . " it.",
+               "Select One", "Iconi")
+        return 0
+    }
+    return rows[1]
+}
+
+; The selected shortcuts in the same CSV format as Export to CSV (header,
+; EscapeCSV quoting, [NEWLINE] for line breaks, $$ for Fire instantly), so
+; the text can be saved as a .csv file and brought back with Import from
+; CSV - where the usual import review applies. Values come from the stored
+; shortcuts, not the list display, and nothing is expanded or run.
+; Sets count to the number of shortcuts included.
+SelectedShortcutsCSV(lv, dataType, &count) {
+    global loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath
+    isL     := (dataType = "launchers")
+    dataMap := isL ? loadedLaunchers : loadedExpansions
+    instSet := InstantSetFor(isL ? launcherPath : textExpansionPath)
+    kind    := isL ? "Launcher" : "Expansion"
+    count   := 0
+    content := "Type,Shortcut,Target/Expansion`n"
+    for , row in SelectedRows(lv) {
+        sc := lv.GetText(row, 1)
+        if (!dataMap.Has(sc))
+            continue
+        content .= kind . "," . EscapeCSV(sc . (instSet.Has(sc) ? "$$" : "")) . ","
+                 . EscapeCSV(dataMap[sc]) . "`n"
+        count++
+    }
+    return content
+}
+
+; The selected shortcuts as plain lines, easy to read and share:
+;   shortcut expansion
+; one per line - the same layout as the shortcut files themselves: line
+; breaks inside a text are written as [NEWLINE] and Fire instantly as $$.
+; The full stored text, exactly as written; nothing is expanded or run.
+SelectedShortcutsText(lv, dataType, &count) {
+    global loadedLaunchers, loadedExpansions, launcherPath, textExpansionPath
+    isL     := (dataType = "launchers")
+    dataMap := isL ? loadedLaunchers : loadedExpansions
+    instSet := InstantSetFor(isL ? launcherPath : textExpansionPath)
+    count   := 0
+    content := ""
+    for , row in SelectedRows(lv) {
+        sc := lv.GetText(row, 1)
+        if (!dataMap.Has(sc))
+            continue
+        content .= sc . (instSet.Has(sc) ? "$$" : "") . " " . EncodeNewlines(dataMap[sc]) . "`n"
+        count++
+    }
+    return content
+}
+
+; Copy Selected: puts the selected shortcuts on the clipboard as plain
+; "shortcut expansion" lines (Export Selected... makes an importable CSV).
+; Local clipboard only, marked to stay out of clipboard history (Win+V)
+; and cloud sync like every other paste in this script; if that can't be
+; done, nothing is copied. The notice names only how many were copied.
+CopySelectedRows(lv, dataType, parentGui) {
+    parentGui.Opt("+OwnDialogs")
+    content := SelectedShortcutsText(lv, dataType, &n)
+    if (n = 0) {
+        MsgBox("Select one or more shortcuts first.", "Nothing Selected", "Iconi")
+        return
+    }
+    if (SetClipboardPrivate(StrReplace(content, "`n", "`r`n")) != 1) {
+        MsgBox("The clipboard is busy, so nothing was copied. Try again in a moment.",
+               "Not Copied", "Icon!")
+        return
+    }
+    TrayTip("Copied " . n . " Shortcut" . (n = 1 ? "" : "s"),
+            "One line each: the shortcut, a space, then its full text.`n" .
+            "To share them for importing, use Export Selected... instead.", "Iconi")
+}
+
+; Export Selected...: the same text, saved to a file the user picks - the
+; same safe save as Export to CSV (temp file + atomic swap)
+ExportSelectedRows(lv, dataType, parentGui) {
+    parentGui.Opt("+OwnDialogs")
+    content := SelectedShortcutsCSV(lv, dataType, &n)
+    if (n = 0) {
+        MsgBox("Select one or more shortcuts first.", "Nothing Selected", "Iconi")
+        return
+    }
+    savePath := FileSelect("S16", A_ScriptDir . "\shortcuts_selected.csv",
+                           "Export Selected Shortcuts to CSV", "CSV Files (*.csv)")
+    if (savePath = "")
+        return
+    err := ReplaceFileSafely(savePath, content, 0)
+    if (err != "") {
+        MsgBox("Export failed: " . err, "Error", "Icon!")
+        return
+    }
+    MsgBox("Exported " . n . " shortcut" . (n = 1 ? "" : "s") . " to:`n" . savePath,
+           "Export Complete", "Iconi")
 }
 
 TestSelectedRow(lv, dataType) {
     global loadedExpansions
-    row := lv.GetNext(0, "Focused")
+    row := PickOneRow(lv, "test")
     if (!row)
-        row := lv.GetNext()
-    if (!row) {
-        MsgBox("Please select a row to test.", "Nothing Selected", "Iconi")
         return
-    }
     shortcut := lv.GetText(row, 1)
     target   := lv.GetText(row, 2)
     if (dataType = "launchers") {
@@ -3168,7 +3533,8 @@ ShowFullHelp() {
     gHelp.Add("Text", "x10 y" . y . " w480 h1 Background808080")
     y += 8
     extras := ["Usage Statistics", "Export/Import CSV",
-               "Run on Windows Startup", "Backups auto-saved to .\backups\"]
+               "Run on Windows Startup", "Backups auto-saved to .\backups\",
+               "Shortcuts are saved as readable text - not for passwords or 2FA codes"]
     for item in extras {
         gHelp.Add("Text", "x20 y" . y . " w460 h18 c555555", "  " . item)
         y += 20
@@ -4275,7 +4641,7 @@ ToggleMacrosPause() {
 
 LoadHoldKeysPrefs() {
     global prefsPath, holdKeysOn, holdKeysMs, holdKeysNews, capsKeyOn, mouseKeyOn, mouseKeyMode
-    global spaceSymOn, spaceSymMs
+    global spaceSymOn, spaceSymMs, spaceMode
     ; Hold keys start ON for everyone.
     ;   New install (no prefs.ini yet): CheckFirstRun saves the setting and
     ;   the welcome message announces it.
@@ -4318,8 +4684,11 @@ LoadHoldKeysPrefs() {
         ms := IniRead(prefsPath, "HoldKeys", "HoldMs", "200")
         if (IsInteger(ms) && ms >= 100 && ms <= 1000)
             holdKeysMs := Integer(ms)
-        ; Space Symbols: off unless ticked (not switched on for upgrades)
-        spaceSymOn := (IniRead(prefsPath, "HoldKeys", "SpaceSymbols", "0") = "1")
+        ; Space bar: off unless chosen (not switched on for upgrades).
+        ; 1 = symbols (as before), shift = hold for Shift
+        sp := IniRead(prefsPath, "HoldKeys", "SpaceSymbols", "0")
+        spaceSymOn := (sp = "1" || sp = "shift")
+        spaceMode  := (sp = "shift") ? "shift" : "symbols"
         sms := IniRead(prefsPath, "HoldKeys", "SpaceMs", "250")
         if (IsInteger(sms) && sms >= 150 && sms <= 1000)
             spaceSymMs := Integer(sms)
@@ -4365,7 +4734,7 @@ CapsLockKey(*) {
 
 ; Help rows for the hold keys (Starter and Full help share them)
 HoldKeysHelpRows() {
-    global capsKeyOn, mouseKeyOn, mouseKeyMode, spaceSymOn, spaceSymbolList
+    global capsKeyOn, mouseKeyOn, mouseKeyMode, spaceSymOn, spaceSymbolList, spaceMode
     rows := [
         ["hold `;",  "Ctrl + next key   (hold `; + C = copy)"],
         ["hold ``",  "Alt + next key"],
@@ -4373,8 +4742,13 @@ HoldKeysHelpRows() {
         ["Middle btn", !mouseKeyOn ? "normal   (change in tray menu)"
                      : mouseKeyMode = "alt" ? "click = ``  hold = Alt  Shift = normal" : "click = `;  hold = Ctrl  Shift = normal"]
     ]
+    ; (the key column is narrow, so Ctrl+Alt+Space goes in the text)
     if (!spaceSymOn) {
-        rows.Push(["hold Space", "normal   (symbols: option in tray menu)"])
+        rows.Push(["hold Space", "normal   (Ctrl+Alt+Space: symbols or Shift)"])
+        return rows
+    }
+    if (spaceMode = "shift") {
+        rows.Push(["hold Space", "Shift + next key  (Ctrl+Alt+Space switches)"])
         return rows
     }
     ; Two rows: "J !   K ?   L "  ..."
@@ -4396,28 +4770,98 @@ SpaceSymbolsText() {
     msg .= "`nShift works too (hold Space + Shift + J = !).`n`n"
     msg .= "A quick tap of Space is a normal space, and typing fast is safe:`n"
     msg .= "Space only becomes symbols after it is held alone for " . spaceSymMs . " ms.`n"
-    msg .= "Ctrl / Alt / Shift + Space work as usual. Esc lets go at once.`n`n"
+    msg .= "Ctrl / Alt / Shift + Space work as usual. Esc lets go at once.`n"
+    msg .= "Ctrl+Alt+Space switches: off -> symbols -> Shift.`n`n"
     msg .= "Symbols set off your shortcuts like typed ones: hold Space + J J = !!`n"
     msg .= "(make a `"!!`" shortcut with Fire instantly ticked).`n`n"
     msg .= "If you still run the separate SpaceSymbols.ahk, exit it - this replaces it."
     return msg
 }
 
-ToggleSpaceSymbols(*) {
-    global spaceSymOn, spaceSymMenu, prefsPath
-    spaceSymOn := !spaceSymOn
-    try IniWrite(spaceSymOn ? "1" : "0", prefsPath, "HoldKeys", "SpaceSymbols")
-    ApplyHoldKeys()
-    if (spaceSymOn) {
-        A_TrayMenu.Check(spaceSymMenu)
-        MsgBox(SpaceSymbolsText(), "Space Symbols On", "Iconi")
-    } else {
-        A_TrayMenu.Uncheck(spaceSymMenu)
-        TrayTip("Space Symbols Off", "The space bar works as usual again.", "Iconi")
-    }
+; Tray sub-menu for the space bar: Off / hold for symbols / hold for Shift
+BuildSpaceMenu() {
+    global spaceSubMenu, spaceItemOff, spaceItemSym, spaceItemShift
+    spaceSubMenu := Menu()
+    spaceSubMenu.Add(spaceItemOff,   (*) => SetSpaceMode("off"))
+    spaceSubMenu.Add(spaceItemSym,   (*) => SetSpaceMode("symbols"))
+    spaceSubMenu.Add(spaceItemShift, (*) => SetSpaceMode("shift"))
+    MarkSpaceMenu()
+    return spaceSubMenu
 }
 
-; Space bar: tap = a space, hold + letter = a symbol (spaceSymbolList).
+MarkSpaceMenu() {
+    global spaceSubMenu, spaceSymOn, spaceMode, spaceItemOff, spaceItemSym, spaceItemShift
+    if (!IsObject(spaceSubMenu))
+        return
+    for , item in [spaceItemOff, spaceItemSym, spaceItemShift]
+        spaceSubMenu.Uncheck(item)
+    spaceSubMenu.Check(!spaceSymOn ? spaceItemOff
+                     : spaceMode = "shift" ? spaceItemShift : spaceItemSym)
+}
+
+; Saved in prefs.ini [HoldKeys] SpaceSymbols = 0 (off), 1 (symbols) or
+; shift - 1 means symbols, as in earlier versions
+; quiet = from Ctrl+Alt+Space: a short tray notice instead of a window
+SetSpaceMode(mode, quiet := false) {
+    global spaceSymOn, spaceMode, prefsPath
+    spaceSymOn := (mode != "off")
+    if (spaceSymOn)
+        spaceMode := mode
+    try IniWrite(mode = "off" ? "0" : mode = "shift" ? "shift" : "1",
+                 prefsPath, "HoldKeys", "SpaceSymbols")
+    ApplyHoldKeys()
+    MarkSpaceMenu()
+    if (quiet) {
+        if (!spaceSymOn)
+            ShowNearCursor("Space bar: normal")
+        else if (mode = "shift")
+            ShowNearCursor("Space bar: hold for Shift   (Space + a = A)")
+        else
+            ShowNearCursor("Space bar: hold for symbols   (Space + J = !)")
+        return
+    }
+    if (!spaceSymOn)
+        TrayTip("Space Bar Normal", "The space bar works as usual again.", "Iconi")
+    else if (mode = "shift")
+        MsgBox(SpaceShiftText(), "Space Bar: Hold for Shift", "Iconi")
+    else
+        MsgBox(SpaceSymbolsText(), "Space Symbols On", "Iconi")
+}
+
+; A short note next to the text cursor (or the mouse pointer, in apps that
+; don't report the text cursor), gone after 1.5 s. Tooltip number 20, so it
+; never replaces another tooltip.
+ShowNearCursor(text) {
+    CoordMode("Caret", "Screen")
+    CoordMode("Mouse", "Screen")
+    CoordMode("ToolTip", "Screen")
+    x := 0, y := 0
+    if (CaretGetPos(&x, &y) && (x || y)) {
+        y += 24                            ; just below the line being typed
+    } else {
+        MouseGetPos(&x, &y)
+        x += 16, y += 20                   ; beside the pointer
+    }
+    ToolTip(text, x, y, 20)
+    SetTimer(() => ToolTip(, , , 20), -1500)
+}
+
+SpaceShiftText() {
+    global spaceSymMs
+    msg := "Hold Space, wait a moment, then type: the space bar works like Shift.`n`n"
+    msg .= "   Space + a = A      Space + 1 = !      Space + / = ?`n"
+    msg .= "   Keep holding Space for a whole word in capitals.`n`n"
+    msg .= "A quick tap of Space is a normal space, and typing fast is safe:`n"
+    msg .= "Space only becomes Shift after it is held alone for " . spaceSymMs . " ms.`n"
+    msg .= "Held with no key pressed, it still types a space when you let go.`n"
+    msg .= "Ctrl / Alt / Shift + Space work as usual. Esc lets go at once.`n"
+    msg .= "Ctrl+Alt+Space switches: off -> symbols -> Shift.`n`n"
+    msg .= "Capitals set off your shortcuts like typed ones (hold Space + E after js = jsE)."
+    return msg
+}
+
+; Space bar: tap = a space, hold + letter = a symbol (spaceSymbolList),
+; or, with "Hold for Shift" chosen, hold + any key = Shift + that key.
 ; Same method as HoldKey: until it's known whether Space is a tap or a
 ; hold, every key is held back and queued in order, so fast typing comes
 ; out exactly as typed. It runs inside this script, so its keyboard hook
@@ -4426,13 +4870,21 @@ ToggleSpaceSymbols(*) {
 ; Safety: the keyboard is never held back for long. Esc, Ctrl, Alt or Win
 ; end the layer at once; so do 2 s with no key and 8 s in all.
 SpaceSymbolKey(*) {
-    global spaceSymMs, spaceSymbolList
+    global spaceSymMs, spaceSymbolList, spaceMode
     static byVk := ""
     static IDLE_MS := 2000, MAX_MS := 8000
     if (!IsObject(byVk)) {
         byVk := Map()
         for , pair in spaceSymbolList
             byVk[GetKeyVK(pair[1])] := pair[2]
+    }
+    ; Ctrl+Alt+Space switches the space bar setting (normally caught by its
+    ; own hotkey first; this covers it if the space bar's hotkey gets it)
+    if (GetKeyState("Ctrl") && GetKeyState("Alt") && !GetKeyState("Shift")
+        && !GetKeyState("LWin") && !GetKeyState("RWin")) {
+        RunCommand(CycleSpaceMode)
+        KeyWait("Space", "T3")
+        return
     }
     ; With a modifier down - physically, or logically from a hold key
     ; (Caps Lock = Alt) - Space is just Space: Ctrl+Space, Alt+Space ...
@@ -4499,7 +4951,12 @@ SpaceSymbolKey(*) {
             } else {
                 while (q.Length) {
                     ev := q.RemoveAt(1)
-                    if (byVk.Has(ev[1]) && (ev[3] = "" || ev[3] = "+")) {
+                    if (spaceMode = "shift" && (ev[3] = "" || ev[3] = "+")) {
+                        ; Hold for Shift: the key exactly as typed, with
+                        ; Shift held (level 1: shortcuts see it)
+                        ReplayHeldKey([ev[1], ev[2], "+"])
+                        usedLayer := true
+                    } else if (spaceMode != "shift" && byVk.Has(ev[1]) && (ev[3] = "" || ev[3] = "+")) {
                         SendLevel(1)       ; level 1: this script's shortcuts see it
                         SendEvent("{Text}" . byVk[ev[1]])
                         SendLevel(0)
@@ -4898,6 +5355,22 @@ SetupRescueHotkeys() {
     } catch Error as err {
         MsgBox("Could not set up Ctrl+Alt+Shift+K / R: " . err.Message, "Rescue Shortcuts", "Icon!")
     }
+}
+
+; Ctrl+Alt+Space steps the space bar: Off -> symbols -> Shift -> Off.
+; Both modes. Run through RunCommand, like the Alt commands, so a hold key
+; used as Alt is let go cleanly first.
+SetupSpaceToggleHotkey() {
+    try {
+        Hotkey("^!Space", (*) => RunCommand(CycleSpaceMode))
+    } catch Error as err {
+        MsgBox("Could not set up Ctrl+Alt+Space: " . err.Message, "Space Bar", "Icon!")
+    }
+}
+
+CycleSpaceMode(*) {
+    global spaceSymOn, spaceMode
+    SetSpaceMode(!spaceSymOn ? "symbols" : spaceMode = "symbols" ? "shift" : "off", true)
 }
 
 ; Key Check: what Windows and this script think is pressed right now, in

@@ -1,5 +1,36 @@
 # Changelog
 
+## v2.1.4
+
+### New
+- **Edit Shortcuts: Copy Selected and Export Selected…** Select one or more shortcuts (Ctrl+click to add or remove one, Shift+click for a range):
+  - **Copy Selected** puts them on the clipboard as plain lines, easy to paste into an email or message: the shortcut, a space, then its full text (for example `` `2 https://mail.google.com ``). Everything is copied exactly as stored: `{clip}`, `{key:…}` and the rest are kept as written, never run. Line breaks inside a text show as `[NEWLINE]`, and Fire instantly as `$$`.
+  - **Export Selected…** saves them to a `.csv` file you choose, in the same format as Export to CSV, so anyone can bring them in with Import from CSV.
+  - The copy is kept out of Windows clipboard history and cloud clipboard, like the program's other pastes.
+
+## v2.1.3
+
+A security update, plus two new conveniences. Your shortcuts and settings are kept, and the launchers you already have keep working.
+
+### Security
+- **Importing a CSV file:** a launcher is no longer imported automatically if it starts a program (`.exe`), opens a Windows shortcut (`.lnk`), points to another computer or network share, opens another app's link (such as `zoommtg:` or `steam:`) or uses an unencrypted `http://` address. You see each one, with the full path, what a `.lnk` really opens and any extra instructions, and decide one by one. **Skip** is the default. A network path is shown before anything checks it, because checking it already makes Windows connect to that computer. Website (`https://`), email, document and folder launchers import as before.
+- **New launchers:** `ftp://` addresses are refused (they aren't encrypted). An `http://` address is added only after you confirm it, and Alt+W offers to switch it to `https://`. Launchers you already have with these addresses still work, and can still be renamed.
+- The Alt+T window and the help screen now say that shortcuts are saved on your PC as readable text, so they shouldn't hold passwords, 2FA codes or other secrets.
+
+### New
+- **Hold the space bar for Shift** (tray menu, **Space bar**, off by default). The space bar has three choices:
+  - **Off:** a normal space bar.
+  - **Hold for symbols:** Space + J = `!`, as before.
+  - **Hold for Shift:** hold Space, wait a moment, then type, and the space bar works like Shift: Space + a = A, Space + 1 = `!`. Keep holding it for a whole word in capitals.
+
+  A quick tap is a normal space and fast typing is safe: Space only becomes Shift or symbols after it's held alone for a quarter second. If you used Space Symbols before, it stays on as "Hold for symbols".
+- **Ctrl+Alt+Space** steps through the three space bar choices: Off → symbols → Shift → Off. A small note next to the text cursor says which one is on.
+- **Edit Shortcuts: delete several at once.** Ctrl+click to add or remove shortcuts one at a time, or Shift+click to select a range, then click **Delete**. You see every name before anything is deleted, and **No** is the default. Edit and Test still work on one shortcut at a time.
+
+### Fixes
+- **Edit Shortcuts:** closing the window while a "Delete …?" question was open showed an error ("The control is destroyed"). The question now belongs to the window, so the window can't be closed until you answer.
+- **Edit Shortcuts:** after a delete, the list keeps your search instead of showing everything again and jumping back to the top.
+
 ## v2.1.1
 
 A fix for keys and clicks that could stop working, plus two keyboard shortcuts for getting out of trouble. Your shortcuts and settings are kept.
@@ -46,7 +77,7 @@ A fix for keys and clicks that could stop working, plus two keyboard shortcuts f
 - A `{key:`, `{wait:` or `{focus:` that is never closed is typed as text, never run, and the rest of the expansion is read normally.
 - The clipboard is never left locked, even after an unexpected error while setting private text.
 - Every Ctrl, Alt, Shift and Win key is released on exit or reload, so a reload can't leave one held down.
-- The editor lists select one row at a time.
+- The editor lists select one row at a time. (Since v2.1.3, several rows can be selected for Delete.)
 
 ## v2.0.1
 
