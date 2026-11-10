@@ -1,0 +1,22 @@
+# MultiShortcuts Pro writes these next to MultiShortcutsPro.ahk while it runs.
+# They hold a user's personal shortcuts and settings - never commit them.
+
+# Shortcut and expansion data
+launchers.ahk
+text_expansion.ahk
+
+# Preferences, usage statistics and undo history
+prefs.ini
+usage_stats.ini
+expansion_history.ini
+
+# Backups
+backups/
+*.bak
+
+# Temporary files and locks from safe saving
+*.tmp
+*.lock
+
+# CSV exports (shortcuts and usage statistics) - may contain private text
+*.csv
