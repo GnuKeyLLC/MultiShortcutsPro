@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.1.5
+
+**A change in default behavior:** shortcuts now use the same trigger rules as SpeedKee on your phone, so more of them fire without a space. Each rule can be turned off in the tray menu under **Shortcut Triggers**. All of them are on by default.
+
+### Shortcut Triggers
+- **Double Tap:** type the last letter twice and the shortcut expands at once (`addr` → type `addrr`). The space-or-Enter way still works.
+- **Number:** a name that ends in a digit fires at once (`sig2`, `1m`).
+- **Almost Auto:** a name with a digit or symbol after its first character (`a.b`, `x-ray`), or one ending in a capital (`xN`), fires at once. A symbol only at the start (`!note`) doesn't count.
+- **Auto ($$):** a name ending in `$$`, or with **Fire instantly** ticked, fires at once, as before.
+- **Auto Capitalization:** type a shortcut with a capital first letter (`Addr`) and the text starts with a capital.
+- **Auto Spacing:** type `. , ! ? ;` or `:` right after an expansion and the extra space disappears: `123 Main St .` becomes `123 Main St. `. If you click, switch windows or press an arrow key first, nothing is changed.
+- Swipe 2-letter is a phone-only trigger.
+- Instant shortcuts still never fire from the middle of a word. They can fire at the start of one, though: with Double Tap on, a shortcut `ad` also fires when you type `add` or start typing `address`. Rename it, or turn Double Tap off.
+- A form that's already the name of another shortcut is never taken over. For example, if `Addr` is its own shortcut, Auto Capitalization leaves it alone.
+- **Undo (Alt+Z)** puts back exactly what you typed (`Addr`, `addrr`, `addr.`).
+- When you upgrade, a one-time message explains the new rules. **Tray menu > Shortcut Triggers > About Shortcut Triggers** shows it again.
+
 ## v2.1.4
 
 ### New

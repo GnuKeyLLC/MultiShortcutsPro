@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.1.4 - 2026
+; MULTISHORTCUTS PRO v2.1.5 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -66,6 +66,18 @@
 ; v2.1.4 (2026-11-10):
 ;   - Edit Shortcuts: Copy Selected (plain "shortcut expansion" lines) /
 ;     Export Selected... (a CSV file in the Export to CSV format)
+; v2.1.5 (2026-11-11) - Shortcut Triggers, the same as SpeedKee's
+; (tray menu > Shortcut Triggers, all on by default):
+;   - Double Tap: type the last letter twice and it expands (addrr)
+;   - Number: a name ending in a digit fires instantly (sig2)
+;   - Almost Auto: a name with a digit or symbol after its first
+;     character, or ending in a capital, fires instantly (a.b, xN)
+;   - Auto ($$): a name ending in $$ / "Fire instantly" fires instantly
+;   - Auto Capitalization: type the name with a capital first letter
+;     (Addr) and the expansion starts with a capital
+;   - Auto Spacing: . , ! ? ; : straight after an expansion goes in
+;     place of its space, and the space moves after the mark
+;   - Swipe 2-letter is phone-only (no swipe on a PC keyboard)
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -87,7 +99,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.1.4"
+global appVersion := "2.1.5"
 
 global config := Map(
     "Hotkeys", Map(
@@ -198,6 +210,15 @@ global instantExpansions     := Map()  ; shortcuts saved with the $$ instant-fir
 global instantLaunchers      := Map()  ; launchers saved with $$
 global backupFailedFile  := ""        ; set when an automatic backup failed (see SavedNotice)
 global privateTyping     := false     ; true = type expansions, never use the clipboard
+; Shortcut Triggers (tray menu), the same as SpeedKee's - all on by default.
+; Saved in prefs.ini [AutoTriggers] as 1 / 0.
+global autoTrig := Map("DoubleTap", true, "Number", true, "AlmostAuto", true,
+                       "Dollar", true, "AutoCap", true, "AutoSpacing", true)
+global registeredVariants := Map()    ; extra hotstrings (Addr, addrr) -> opts
+global autoTrigNews      := false     ; true = upgrade: show the one-time note
+global autoSpaceHook     := ""        ; the InputHook waiting for . , ! ? after an expansion
+global autoSpaceState    := ""        ; that hook's link to the expansion's Undo entry
+global lastClickTick     := 0         ; last mouse click (Auto Spacing stands down after one)
 global privateTypingMenu := "Type expansions directly (no clipboard)"
 global hidePreviews      := false     ; true = lists show shortcut names only
 global hidePreviewsMenu  := "Hide expansion text in lists"
@@ -316,6 +337,7 @@ SafeInitialize() {
         LoadModePref()
         LoadHoldKeysPrefs()
         LoadSecurityPrefs()
+        LoadAutoTriggerPrefs()
 
         ; Always set up the data files - seeding the built-in ; ` = families
         ; happens here. Starter mode users get them too.
@@ -357,6 +379,10 @@ SafeInitialize() {
         firstRun := CheckFirstRun()
         if (holdKeysNews && !firstRun)
             SetTimer(ShowHoldKeysNews, -1500)   ; after start-up, so it doesn't block it
+        if (autoTrigNews && !firstRun)
+            SetTimer(ShowAutoTriggerNews, holdKeysNews ? -2500 : -1500)
+        if (firstRun)                           ; a new install starts with these rules
+            try IniWrite("1", prefsPath, "Mode", "AutoTriggersNews")
         justUnlocked := (appMode = "full" && TakeQuickStartFlag())
         if (justUnlocked)
             SetTimer(ShowFullQuickStart, -1500)
@@ -590,6 +616,7 @@ SetupStarterTrayMenu() {
     A_TrayMenu.Add("Quick Start",              (*) => ShowQuickStart())
     A_TrayMenu.Add("Show Built-in Shortcuts",  (*) => ShowHelp())
     A_TrayMenu.Add("Trigger Keys Setup...",      (*) => ShowTriggerSetup())
+    A_TrayMenu.Add("Shortcut Triggers",          BuildAutoTriggerMenu())
     A_TrayMenu.Add(holdKeysMenu,                 ToggleHoldKeys)
     A_TrayMenu.Add(capsKeyMenu,                  ToggleCapsKey)
     A_TrayMenu.Add("Space bar  (Ctrl+Alt+Space)", BuildSpaceMenu())
@@ -652,6 +679,7 @@ SetupFullTrayMenu() {
     if (allowCapture)
         A_TrayMenu.Check(allowCaptureMenu)
     A_TrayMenu.Add("Trigger Keys Setup...",     (*) => ShowTriggerSetup())
+    A_TrayMenu.Add("Shortcut Triggers",         BuildAutoTriggerMenu())
     A_TrayMenu.Add(holdKeysMenu,                ToggleHoldKeys)
     A_TrayMenu.Add(capsKeyMenu,                 ToggleCapsKey)
     A_TrayMenu.Add("Space bar  (Ctrl+Alt+Space)", BuildSpaceMenu())
@@ -1014,7 +1042,7 @@ PromptShortcut(prompt, title, &instant) {
 InstantCheckbox(g, pos, checked := false) {
     cb := g.Add("CheckBox", pos . " w350" . (checked ? " Checked" : ""),
                 "Fire &instantly - no space needed  ($$)")
-    g.Add("Text", "xp+18 y+2 w332 cGray", "Off: type the shortcut, then a space or Enter.")
+    g.Add("Text", "xp+18 y+2 w332 cGray", "Off: needs a space - see tray > Shortcut Triggers")
     return cb
 }
 
@@ -1714,7 +1742,9 @@ UndoLastExpansion() {
         return
     }
     last     := expansionHistory[expansionHistory.Length]
-    original := last["shortcut"]
+    ; What was really typed (Addr, addrr, "addr." after Auto Spacing) -
+    ; known for this session; after a restart, the shortcut name
+    original := last.Has("original") ? last["original"] : last["shortcut"]
     delCount := last.Has("length") ? last["length"] : -1
     if (delCount < 0) {
         expansionHistory.Pop()
@@ -3543,7 +3573,7 @@ ShowFullHelp() {
     tipBg := gHelp.Add("Text", "x10 y" . y . " w480 h74 BackgroundFFFDE7")
     gHelp.Add("Text", "x18 y" . (y+5) . " w468 h86 BackgroundFFFDE7 c555500",
               "TIP: Type your shortcut anywhere - it triggers automatically.`n" .
-              "     Tick `"Fire instantly`" (or end a name with $$) = no space needed.`n" .
+              "     No space needed: Fire instantly ($$), a digit at the end, or addrr.`n" .
               "     Use {date:dd/MM/yyyy} or {time:h:mm tt} for custom formats.`n" .
               "     = family: r= refresh  f= fullscreen  s= save  t= new tab`n" .
               "               1-= 1 week from today  2-= 2 weeks  1m= 1 month`n" .
@@ -3614,7 +3644,7 @@ LoadLaunchers() {
                         callback := MakeLaunchCallback(target, shortcut)
 
                         try {
-                            opts := instantForced ? InstantOptions(shortcut) : GetHotstringOptions(shortcut)
+                            opts := TriggerOptions(shortcut, instantForced)
                             Hotstring(opts . shortcut, callback, "On")
                             registeredLaunchers[shortcut] := opts   ; for a clean unload
                             if (instantForced)
@@ -3630,6 +3660,7 @@ LoadLaunchers() {
     } catch Error as err {
         MsgBox("Error loading launchers: " . err.Message . "`nFile preview: " . SubStr(content, 1, 200), "Load Error", "Icon!")
     }
+    RegisterTriggerVariants()
     UpdateTrayTooltip()
 }
 
@@ -3671,12 +3702,16 @@ LaunchTarget(target, shortcut := "") {
 ;------------------------------------------------
 ; TEXT EXPANSION LOADING
 ;------------------------------------------------
-MakeExpansionCallback(text, sc) {
-    return (*) => DoExpand(text, sc)
+MakeExpansionCallback(text, sc, typed := "", cap := false) {
+    return (*) => DoExpand(text, sc, typed, cap)
 }
 
-DoExpand(text, sc) {
+; typed = what was really typed (Addr, addrr ...) - Undo puts that back.
+; cap = typed with a capital first letter (Auto Capitalization).
+DoExpand(text, sc, typed := "", cap := false) {
     global config
+    if (typed = "")
+        typed := sc
 
     ; ── Step 1: protect sequence tokens before running ResolvePlaceholders ───
     ; Scan character-by-character to correctly handle nested braces like
@@ -3725,6 +3760,10 @@ DoExpand(text, sc) {
 
     ; ── Step 2: resolve non-sequence placeholders ────────────────────────────
     resolved := ResolvePlaceholders(protected)
+    ; Auto Capitalization: only a plain lowercase letter at the very start
+    ; (a text that starts with a {key:} step or a symbol is left alone)
+    if (cap && RegExMatch(resolved, "^\p{Ll}"))
+        resolved := StrUpper(SubStr(resolved, 1, 1)) . SubStr(resolved, 2)
 
     ; ── Step 3: restore sequence tokens ──────────────────────────────────────
     for idx, tok in seqTokens
@@ -3754,12 +3793,15 @@ DoExpand(text, sc) {
         resolved  := UnshieldBraces(resolved)
         if (resolved = "")
             return
-        SendExpandText(resolved, config, true)
+        autoSp := (cursorPos = 0 && !RegExMatch(resolved, "\s$"))
+        SendExpandText(resolved, config, true, autoSp)
         if (cursorPos > 0)
             Send("{Left " . (cursorPos + 1) . "}")   ; +1 for the trailing space
         ; Undo deletes exactly what was typed. Once the caret has moved
         ; back into the text, backspacing would delete the wrong characters.
-        RecordExpansionHistory(sc, sc, cursorPos > 0 ? -1 : StrLen(resolved) + 1)
+        RecordExpansionHistory(sc, typed, cursorPos > 0 ? -1 : StrLen(resolved) + 1)
+        if (autoSp)
+            AutoSpacingLinkHistory()
         return
     }
 
@@ -3853,7 +3895,7 @@ DoExpand(text, sc) {
                         PlayFeedback("ErrorSound")
                         TrayTip("Shortcut Stopped", "'" . sc . "' couldn't switch to '" .
                                 stokValue . "', so the rest wasn't typed.", "Icon!")
-                        RecordExpansionHistory(sc, sc, -1)
+                        RecordExpansionHistory(sc, typed, -1)
                         return
                     }
                 }
@@ -3878,7 +3920,7 @@ DoExpand(text, sc) {
         Send("{Left " . (cursorPos + 1) . "}")
 
     ; Sequences send keystrokes that can't be reversed by backspacing
-    RecordExpansionHistory(sc, sc, -1)
+    RecordExpansionHistory(sc, typed, -1)
 }
 
 ; Removes a {cursor} or {cursor:N} marker from text and returns how many
@@ -3971,7 +4013,9 @@ SetClipboardPrivate(txt) {
 }
 
 ; Types a chunk of text by pasting it, then restores the user's clipboard
-SendExpandText(txt, cfg, addSpace := true) {
+; autoSpace = start Auto Spacing the moment the trailing space is typed
+; (not after the clipboard is put back - a quick "." would be missed)
+SendExpandText(txt, cfg, addSpace := true, autoSpace := false) {
     global privateTyping
     tail := addSpace ? " " : ""
     ; Private typing mode (tray menu): the clipboard is never touched, so no
@@ -3979,6 +4023,8 @@ SendExpandText(txt, cfg, addSpace := true) {
     ; can ever see the text. Slower for long text.
     if (privateTyping) {
         TypeExpandText(txt . tail, cfg)
+        if (autoSpace)
+            StartAutoSpacing()
         return
     }
     savedClip := ClipboardAll()
@@ -3992,6 +4038,8 @@ SendExpandText(txt, cfg, addSpace := true) {
         Sleep(150)          ; let the target app process the paste
         if (addSpace)
             Send(" ")       ; space as a separate keystroke - not trimmed by the app
+        if (autoSpace)
+            StartAutoSpacing()
         Sleep(cfg["Performance"]["ClipRestoreDelay"])   ; slow apps (RDP, Electron) may still be pasting
         if (DllCall("GetClipboardSequenceNumber", "UInt") = mySeq)
             A_Clipboard := savedClip
@@ -4000,6 +4048,8 @@ SendExpandText(txt, cfg, addSpace := true) {
     ; If the private copy fails, type the text instead of putting it on the
     ; clipboard without the privacy markers (Win+V history, cloud sync)
     TypeExpandText(txt . tail, cfg)
+    if (autoSpace)
+        StartAutoSpacing()
     if (r != 0 && DllCall("GetClipboardSequenceNumber", "UInt") = mySeq)
         A_Clipboard := savedClip       ; only if we changed it and nobody else has since
 }
@@ -4181,7 +4231,7 @@ LoadTextExpansions() {
                     if (shortcut != "" && Trim(expansion) != "" && IsValidShortcut(shortcut, false)
                         && !loadedExpansions.Has(shortcut)) {
                         try {
-                            opts := instantForced ? InstantOptions(shortcut) : GetHotstringOptions(shortcut)
+                            opts := TriggerOptions(shortcut, instantForced)
                             Hotstring(opts . shortcut, MakeExpansionCallback(expansion, shortcut), "On")
                             loadedExpansions[shortcut] := expansion
                             registeredExpansions[shortcut] := opts  ; store opts for clean unload
@@ -4197,6 +4247,7 @@ LoadTextExpansions() {
     } catch Error as err {
         MsgBox("Error loading expansions: " . err.Message, "Load Error", "Icon!")
     }
+    RegisterTriggerVariants()
     UpdateTrayTooltip()
 }
 
@@ -4544,8 +4595,7 @@ MigrateToInstantMarker() {
         ; replaced at once by the start-up notice and never seen
         msg := moved . " of your shortcuts fired instantly under the old rule, so they now "
         msg .= "end in $$ and keep working exactly as before.`n`n"
-        msg .= "From now on, your own shortcuts wait for a space or Enter unless you tick "
-        msg .= "`"Fire instantly`" when you add or edit them (or end the name with $$).`n`n"
+        msg .= "Tray menu > Shortcut Triggers says which other shortcuts fire without a space.`n`n"
         msg .= "The built-in `; `` and = shortcuts are instant as always."
         SetTimer(() => MsgBox(msg, "Instant Shortcuts Updated", "Iconi"), -4000)
     }
@@ -4561,6 +4611,280 @@ MigrateToInstantMarker() {
 ; fire from the middle of another word ("design", "maddr").
 InstantOptions(shortcut) {
     return RegExMatch(shortcut, "[a-zA-Z0-9]") ? ":*?0OC:" : ":*?OC:"
+}
+
+;------------------------------------------------
+; SHORTCUT TRIGGERS  (v2.1.5 - the same as SpeedKee's Triggers settings)
+;------------------------------------------------
+; Which rule makes a shortcut fire, in this order:
+;   1. ends in $$ / "Fire instantly"     -> instant   (Auto Trigger)
+;   2. built-in ; ` = families           -> instant   (always)
+;   3. ends in a digit: sig2, 1m         -> instant   (Number Trigger)
+;   4. a digit or symbol after the first
+;      character, or ends in a capital:
+;      a.b, x-ray, xN                    -> instant   (Almost Auto Trigger)
+;   5. anything else: addr, sig          -> waits for a space or Enter
+; Every rule except 2 can be turned off in the tray menu. Leading
+; punctuation alone (!note, .sig) doesn't count for rule 4 - the
+; 2026-10-31 audit took it out on purpose, so those still wait.
+; Instant shortcuts keep the word-start rule (?0): they never fire from the
+; middle of another word ("design" can't fire "sig2").
+TriggerOptions(shortcut, instantForced := false) {
+    global autoTrig
+    if (instantForced && autoTrig["Dollar"])
+        return InstantOptions(shortcut)
+    opts := GetHotstringOptions(shortcut)
+    if (opts = ":*?0OC:")
+        return opts                                    ; built-in family
+    if (autoTrig["Number"] && RegExMatch(shortcut, "\d$"))
+        return ":*?0OC:"
+    if (autoTrig["AlmostAuto"] && AlmostAutoMatch(shortcut))
+        return ":*?0OC:"
+    return opts
+}
+
+AlmostAutoMatch(shortcut) {
+    if (RegExMatch(shortcut, "[A-Z]$"))
+        return true
+    body := RegExReplace(shortcut, "^[^a-zA-Z0-9]+")   ; leading punctuation doesn't count
+    return (body != "" && RegExMatch(body, "[^a-zA-Z]"))
+}
+
+; The extra ways to type a shortcut, registered after both files load:
+;   Double Tap    addr -> addrr also fires (instantly) - only for shortcuts
+;                 that would otherwise wait for a space
+;   Auto Capitalization (text only)
+;                 addr -> Addr also fires, and the text starts with a
+;                 capital. Only when the name starts with a-z.
+; A form that is already somebody's shortcut is never taken over, and the
+; first shortcut to claim a form keeps it.
+RegisterTriggerVariants() {
+    global registeredVariants, loadedExpansions, loadedLaunchers
+    global registeredExpansions, registeredLaunchers, autoTrig
+    for str, opts in registeredVariants
+        try Hotstring(opts . str, , "Off")
+    registeredVariants := Map()
+    if (!autoTrig["DoubleTap"] && !autoTrig["AutoCap"])
+        return
+    taken := Map()
+    for sc in loadedExpansions
+        taken[sc] := true
+    for sc in loadedLaunchers
+        taken[sc] := true
+    for , job in [[loadedExpansions, registeredExpansions, true],
+                  [loadedLaunchers, registeredLaunchers, false]] {
+        for sc, val in job[1] {
+            if (!job[2].Has(sc) || IsAutoInstant(sc))
+                continue                            ; didn't register / built-in family
+            baseOpts := job[2][sc]
+            waits    := (SubStr(baseOpts, 1, 3) = ":*0")
+            forms    := [[sc, false]]
+            if (job[3] && autoTrig["AutoCap"] && RegExMatch(sc, "^[a-z]")) {
+                capSc := StrUpper(SubStr(sc, 1, 1)) . SubStr(sc, 2)
+                if (AddTriggerVariant(capSc, baseOpts, job[3], val, sc, true, taken))
+                    forms.Push([capSc, true])
+            }
+            if (!waits || !autoTrig["DoubleTap"])
+                continue
+            for , f in forms {
+                dt := f[1] . SubStr(f[1], -1)
+                AddTriggerVariant(dt, ":*?0OC:", job[3], val, sc, f[2], taken)
+            }
+        }
+    }
+}
+
+AddTriggerVariant(str, opts, isText, val, sc, cap, taken) {
+    global registeredVariants
+    if (taken.Has(str) || !IsValidShortcut(str, false))
+        return false
+    cb := isText ? MakeExpansionCallback(val, sc, str, cap) : MakeLaunchCallback(val, sc)
+    try {
+        Hotstring(opts . str, cb, "On")
+    } catch {
+        return false
+    }
+    registeredVariants[str] := opts
+    taken[str] := true
+    return true
+}
+
+LoadAutoTriggerPrefs() {
+    global prefsPath, autoTrig, autoTrigNews
+    if (!FileExist(prefsPath)) {
+        ApplyAutoSpacingClicks()
+        return                                      ; new install: all on
+    }
+    for key in autoTrig.Clone()
+        try autoTrig[key] := (IniRead(prefsPath, "AutoTriggers", key, "1") = "1")
+    ; An upgrade from before 2.1.5: say once what changed
+    seen := "0"
+    try seen := IniRead(prefsPath, "Mode", "AutoTriggersNews", "0")
+    if (seen != "1") {
+        autoTrigNews := true
+        try IniWrite("1", prefsPath, "Mode", "AutoTriggersNews")
+    }
+    ApplyAutoSpacingClicks()
+}
+
+AutoTriggerMenuItems() {
+    return [["DoubleTap",   "Double Tap - type the last letter twice (addrr)"],
+            ["Number",      "Number - a name ending in a digit fires at once (sig2)"],
+            ["AlmostAuto",  "Almost Auto - a symbol/digit inside, or a capital at the end (xN)"],
+            ["Dollar",      "Auto - a name ending in $$ fires at once"],
+            ["",            ""],
+            ["AutoCap",     "Auto Capitalization - Addr gives a capital first letter"],
+            ["AutoSpacing", "Auto Spacing - fix the space before . , ! ? after an expansion"]]
+}
+
+BuildAutoTriggerMenu() {
+    global autoTrig
+    m := Menu()
+    for , it in AutoTriggerMenuItems() {
+        if (it[1] = "") {
+            m.Add()
+            continue
+        }
+        m.Add(it[2], ToggleAutoTrigger.Bind(it[1], it[2]))
+        if (autoTrig[it[1]])
+            m.Check(it[2])
+    }
+    m.Add()
+    m.Add("About Shortcut Triggers...", (*) => MsgBox(AutoTriggerHelpText(),
+                                         "Shortcut Triggers", "Iconi"))
+    return m
+}
+
+ToggleAutoTrigger(key, label, itemName, itemPos, m) {
+    global autoTrig, prefsPath, autoSpaceHook
+    autoTrig[key] := !autoTrig[key]
+    try IniWrite(autoTrig[key] ? "1" : "0", prefsPath, "AutoTriggers", key)
+    if (autoTrig[key])
+        m.Check(label)
+    else
+        m.Uncheck(label)
+    if (key = "AutoSpacing") {
+        ApplyAutoSpacingClicks()
+        if (!autoTrig[key] && IsObject(autoSpaceHook))
+            try autoSpaceHook.Stop()
+    } else {
+        LoadLaunchers()                 ; registers everything again
+        LoadTextExpansions()            ; under the new rules
+    }
+    TrayTip(label, autoTrig[key] ? "On" : "Off", "Iconi")
+}
+
+AutoTriggerHelpText() {
+    msg := "Shortcut Triggers - the same as SpeedKee on the phone.`n`n"
+    msg .= "FIRE AT ONCE (no space needed):`n"
+    msg .= "  Auto - the name ends in $$ (or `"Fire instantly`" is ticked).`n"
+    msg .= "  Number - the name ends in a digit: sig2, 1m.`n"
+    msg .= "  Almost Auto - a digit or symbol after the first character (a.b, x-ray),`n"
+    msg .= "      or a capital at the end (xN).`n"
+    msg .= "  Double Tap - type the last letter twice: addr -> addrr.`n"
+    msg .= "      Careful with real words: a shortcut `"ad`" also fires on `"add`"`n"
+    msg .= "      and at the start of `"address`".`n"
+    msg .= "  Everything else waits for a space or Enter, as before.`n"
+    msg .= "  The built-in `; `` and = shortcuts are always instant.`n`n"
+    msg .= "EXPANSION:`n"
+    msg .= "  Auto Capitalization - type Addr (capital first letter) and the text`n"
+    msg .= "      starts with a capital.`n"
+    msg .= "  Auto Spacing - type . , ! ? `; or : right after an expansion and the`n"
+    msg .= "      extra space goes away: `"123 Main St .`" becomes `"123 Main St. `"`n`n"
+    msg .= "Swipe 2-letter is a phone-only trigger. Each of these can be turned off`n"
+    msg .= "here: tray menu > Shortcut Triggers."
+    return msg
+}
+
+ShowAutoTriggerNews() {
+    MsgBox("NEW in " . appVersion . " - Shortcut Triggers, the same as SpeedKee on your phone.`n`n" .
+           AutoTriggerHelpText(), "What's New in MultiShortcuts Pro " . appVersion, "Iconi")
+}
+
+;------------------------------------------------
+; AUTO SPACING
+;------------------------------------------------
+; Every expansion ends in a space. If the very next key is . , ! ? ; or :
+; that space goes away and comes back after the mark:
+;   "123 Main St ."  ->  "123 Main St. "
+; Stands down when anything else happens first: another character, an
+; arrow / Enter / Backspace / Tab / Esc, a mouse click, another window,
+; or 5 seconds of nothing - so it never deletes text in the wrong place.
+StartAutoSpacing() {
+    global autoTrig, autoSpaceHook, autoSpaceState
+    autoSpaceState := ""
+    if (!autoTrig["AutoSpacing"])
+        return
+    if (IsObject(autoSpaceHook))
+        try autoSpaceHook.Stop()
+    ; V = the key still goes through. I = this script's own typing (the
+    ; rest of the expansion, the clipboard) is ignored, but Space-bar
+    ; symbols (sent at level 1) count, so hold Space + J for ! works too.
+    ih := InputHook("V L1 T8 I")
+    ih.KeyOpt("{Left}{Right}{Up}{Down}{Home}{End}{PgUp}{PgDn}{Enter}{NumpadEnter}{Tab}{Esc}{Backspace}{Delete}", "E")
+    ; The Undo entry is written a moment later (AutoSpacingLinkHistory)
+    autoSpaceState := {entry: "", mark: ""}
+    ih.OnEnd := AutoSpacingEnd.Bind(WinExist("A"), A_TickCount, autoSpaceState)
+    autoSpaceHook := ih
+    ih.Start()
+}
+
+; Called once the expansion's Undo entry exists: hands it to the waiting
+; hook, or applies a mark that was already typed in the meantime
+AutoSpacingLinkHistory() {
+    global autoSpaceState, expansionHistory, appMode
+    if (!IsObject(autoSpaceState))
+        return
+    st := autoSpaceState
+    st.entry := (appMode = "full" && expansionHistory.Length) ? expansionHistory[expansionHistory.Length] : ""
+    if (st.mark != "")
+        AutoSpacingUndoMark(st.entry, st.mark)
+    autoSpaceState := ""                ; linked - the next expansion starts fresh
+}
+
+AutoSpacingEnd(winId, started, st, ih) {
+    global lastClickTick
+    if (ih.EndReason != "Max")
+        return
+    ch := ih.Input
+    if (ch = "" || !InStr(".,!?;:", ch))
+        return
+    if (WinExist("A") != winId || lastClickTick > started)
+        return                          ; another window, or the caret was moved by a click
+    if (GetKeyState("Ctrl") || GetKeyState("Alt") || GetKeyState("LWin") || GetKeyState("RWin"))
+        return
+    Sleep(20)                           ; let the app put the mark in first
+    Send("{BS 2}")                      ; the mark and the space before it
+    SendText(ch . " ")
+    ; Undo still puts back exactly what was typed (with the mark)
+    if (IsObject(st.entry))
+        AutoSpacingUndoMark(st.entry, ch)
+    else
+        st.mark := ch                   ; the entry isn't written yet
+}
+
+AutoSpacingUndoMark(entry, ch) {
+    global expansionHistory
+    if (!IsObject(entry) || !expansionHistory.Length
+        || expansionHistory[expansionHistory.Length] != entry || entry["length"] <= 0)
+        return
+    entry["length"]   += 1
+    entry["original"] .= ch
+    SaveExpansionHistory()
+}
+
+; A mouse click while Auto Spacing waits may have moved the caret, so the
+; click is noted (~ = the click still goes through as normal).
+ApplyAutoSpacingClicks() {
+    global autoTrig
+    state := autoTrig["AutoSpacing"] ? "On" : "Off"
+    for , b in ["~*LButton", "~*RButton"]
+        try Hotkey(b, NoteClick, state)
+}
+
+NoteClick(*) {
+    global lastClickTick
+    lastClickTick := A_TickCount
 }
 
 IsValidShortcut(shortcut, showMessages := true) {
