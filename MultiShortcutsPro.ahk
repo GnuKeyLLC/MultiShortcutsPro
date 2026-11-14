@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.1.5 - 2026
+; MULTISHORTCUTS PRO v2.1.6 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -78,6 +78,12 @@
 ;   - Auto Spacing: . , ! ? ; : straight after an expansion goes in
 ;     place of its space, and the space moves after the mark
 ;   - Swipe 2-letter is phone-only (no swipe on a PC keyboard)
+; v2.1.6 (2026-11-14):
+;   - space bar symbols: hold Space + R = Backspace (R for Remove),
+;     + X = delete the last word (X to cross it out), + Z = undo the last
+;     expansion (the same as Alt+Z, once per hold). Holding R or X
+;     repeats. Only in "Hold for symbols" - with "Hold for Shift" they
+;     stay capitals.
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -99,7 +105,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.1.5"
+global appVersion := "2.1.6"
 
 global config := Map(
     "Hotkeys", Map(
@@ -262,6 +268,16 @@ global spaceSymbolList := [
     ["c", "^"],     ; Caret
     [",", "<"],     ; the comma key - < is printed on it
     [".", ">"]      ; the period key - > is printed on it
+]
+; Hold Space, then tap the letter: a key press instead of a symbol.
+; Kept apart from spaceSymbolList, so "19 symbols" stays true and the
+; help lists them on their own line. Letters must not be in the list above.
+global spaceEditList := [
+    ["r", "{BS}",  "Backspace"],   ; left index, top row - R for Remove
+    ; X: select the word before the cursor, then delete it. Not Ctrl+Backspace:
+    ; older Windows text boxes type a box character for that instead.
+    ["x", "^+{Left}{BS}", "Delete word"],  ; left ring, bottom row - X to cross it out
+    ["z", "undo", "Undo expansion"]        ; left pinky, bottom row - Z = undo, like Alt+Z
 ]
 global mouseKeyOn        := false     ; middle mouse button in use (on by default, like ;)
 global mouseKeyMode      := "ctrl"    ; "alt"  = click types `, hold = Alt   (like Caps Lock)
@@ -463,7 +479,8 @@ HoldKeysIntro() {
     if (spaceSymOn && spaceMode = "shift")
         msg .= "   SPACE BAR:  hold, then a letter = a capital (works like Shift)`n"
     else if (spaceSymOn)
-        msg .= "   SPACE BAR:  hold + a letter = a symbol (J = !  K = ?  A = @ ...)`n"
+        msg .= "   SPACE BAR:  hold + a letter = a symbol (J = !  K = ?  A = @ ...),`n"
+        msg .= "      R = Backspace,  X = delete the last word,  Z = undo the last expansion`n"
     msg .= "`nCHANGE ANY OF IT - right-click the tray icon:`n"
     msg .= "   Hold `; for Ctrl, hold `` for Alt  -  tick or untick`n"
     msg .= "   Caps Lock: tap = ``, hold = Alt  -  untick for the normal Caps Lock`n"
@@ -5082,7 +5099,17 @@ HoldKeysHelpRows() {
         line[i <= half ? 1 : 2] .= StrUpper(pair[1]) . " " . pair[2] . "   "
     rows.Push(["hold Space", RTrim(line[1])])
     rows.Push(["  + letter", RTrim(line[2])])
+    rows.Push(["  + R  X  Z", "Backspace / delete last word / undo expansion"])
     return rows
+}
+
+; "R Backspace   X Delete word   Z Undo expansion" for the help screens
+SpaceEditLine() {
+    global spaceEditList
+    line := ""
+    for , e in spaceEditList
+        line .= StrUpper(e[1]) . " " . e[3] . "   "
+    return RTrim(line)
 }
 
 ; Full list for the tray tick and the Quick Start
@@ -5091,6 +5118,9 @@ SpaceSymbolsText() {
     msg := "Hold Space, then tap a letter:`n`n"
     for i, pair in spaceSymbolList
         msg .= "   " . StrUpper(pair[1]) . "   " . pair[2] . (Mod(i, 4) = 0 ? "`n" : "      ")
+    msg .= "`nAnd three keys:   " . StrReplace(SpaceEditLine(), "   ", "      ") . "`n"
+    msg .= "(R removes a letter, X crosses out the last word - hold to repeat.`n"
+    msg .= " Z undoes the last expansion, the same as Alt+Z.)`n"
     msg .= "`nShift works too (hold Space + Shift + J = !).`n`n"
     msg .= "A quick tap of Space is a normal space, and typing fast is safe:`n"
     msg .= "Space only becomes symbols after it is held alone for " . spaceSymMs . " ms.`n"
@@ -5194,13 +5224,16 @@ SpaceShiftText() {
 ; Safety: the keyboard is never held back for long. Esc, Ctrl, Alt or Win
 ; end the layer at once; so do 2 s with no key and 8 s in all.
 SpaceSymbolKey(*) {
-    global spaceSymMs, spaceSymbolList, spaceMode
-    static byVk := ""
+    global spaceSymMs, spaceSymbolList, spaceEditList, spaceMode
+    static byVk := "", editVk := ""
     static IDLE_MS := 2000, MAX_MS := 8000
     if (!IsObject(byVk)) {
         byVk := Map()
         for , pair in spaceSymbolList
             byVk[GetKeyVK(pair[1])] := pair[2]
+        editVk := Map()
+        for , e in spaceEditList
+            editVk[GetKeyVK(e[1])] := e[2]
     }
     ; Ctrl+Alt+Space switches the space bar setting (normally caught by its
     ; own hotkey first; this covers it if the space bar's hotkey gets it)
@@ -5260,6 +5293,7 @@ SpaceSymbolKey(*) {
     t0        := A_TickCount
     layer     := false     ; true once Space has been held alone long enough
     usedLayer := false     ; a symbol was typed
+    undoneHere := false    ; Space + Z already undid an expansion in this hold
     spaceSent := false
     try {
         loop {
@@ -5279,6 +5313,22 @@ SpaceSymbolKey(*) {
                         ; Hold for Shift: the key exactly as typed, with
                         ; Shift held (level 1: shortcuts see it)
                         ReplayHeldKey([ev[1], ev[2], "+"])
+                        usedLayer := true
+                    } else if (spaceMode != "shift" && editVk.Has(ev[1]) && (ev[3] = "" || ev[3] = "+")) {
+                        if (editVk[ev[1]] = "undo") {
+                            ; Z = Alt+Z. Once per hold: Z's auto-repeat would
+                            ; otherwise undo older expansions one after another
+                            if (!undoneHere)
+                                UndoLastExpansion()
+                            undoneHere := true
+                        } else {
+                            ; Backspace / delete word. The letter's auto-repeat
+                            ; comes through as more presses, so holding repeats.
+                            ; Level 1: the shortcuts' typing buffer sees it.
+                            SendLevel(1)
+                            SendEvent(editVk[ev[1]])    ; not Blind: a held Shift would change what it does
+                            SendLevel(0)
+                        }
                         usedLayer := true
                     } else if (spaceMode != "shift" && byVk.Has(ev[1]) && (ev[3] = "" || ev[3] = "+")) {
                         SendLevel(1)       ; level 1: this script's shortcuts see it

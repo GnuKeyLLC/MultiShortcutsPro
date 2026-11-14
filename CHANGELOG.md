@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.1.6
+
+### New
+- **Fix typos from the space bar.** With the space bar set to **Hold for symbols**, hold Space and tap **R** for Backspace (R for Remove), or **X** to delete the whole last word (X to cross it out). Keep holding the letter and it repeats. The 19 symbols are unchanged.
+- **Undo an expansion from the space bar.** Hold Space and tap **Z** to undo the last expansion, the same as Alt+Z: it puts back what you typed. It undoes one expansion per hold, even if you keep holding Z.
+- Like the symbols, it only starts after Space is held alone for a quarter second, so fast typing is never affected. With **Hold for Shift**, R and X still type capitals.
+
 ## v2.1.5
 
 **A change in default behavior:** shortcuts now use the same trigger rules as SpeedKee on your phone, so more of them fire without a space. Each rule can be turned off in the tray menu under **Shortcut Triggers**. All of them are on by default.
