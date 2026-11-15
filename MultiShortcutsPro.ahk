@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.1.6 - 2026
+; MULTISHORTCUTS PRO v2.1.7 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -84,6 +84,9 @@
 ;     expansion (the same as Alt+Z, once per hold). Holding R or X
 ;     repeats. Only in "Hold for symbols" - with "Hold for Shift" they
 ;     stay capitals.
+; v2.1.7 (2026-11-15):
+;   - Undo (Alt+Z, Space + Z) removes the expansion completely: the
+;     shortcut is no longer typed back
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -105,7 +108,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.1.6"
+global appVersion := "2.1.7"
 
 global config := Map(
     "Hotkeys", Map(
@@ -1771,12 +1774,15 @@ UndoLastExpansion() {
                 "Iconi")
         return
     }
+    ; v2.1.7: the expansion goes away completely - the shortcut is NOT
+    ; typed back. An expansion that fires by accident means you wanted
+    ; something else there, not the shortcut name (and typing it back
+    ; could fire it again). A . , ! ? that Auto Spacing moved after the
+    ; expansion goes too: kept alone it would be a stray mark.
     Send("{BS " . delCount . "}")
-    Sleep(30)
-    SendText(original)
     expansionHistory.Pop()
     SaveExpansionHistory()
-    TrayTip("Undone", "Restored '" . original . "'", "Iconi")
+    TrayTip("Undone", "Removed the '" . original . "' expansion", "Iconi")
 }
 
 ; typedLength = exact number of characters typed (including any trailing
@@ -4873,7 +4879,7 @@ AutoSpacingEnd(winId, started, st, ih) {
     Sleep(20)                           ; let the app put the mark in first
     Send("{BS 2}")                      ; the mark and the space before it
     SendText(ch . " ")
-    ; Undo still puts back exactly what was typed (with the mark)
+    ; Undo removes the mark along with the expansion (v2.1.7)
     if (IsObject(st.entry))
         AutoSpacingUndoMark(st.entry, ch)
     else

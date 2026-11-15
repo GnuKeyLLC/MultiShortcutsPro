@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.1.7
+
+### Changed
+- **Undo removes the whole expansion.** Alt+Z and Space + Z now take out the expansion and leave nothing in its place. Before, they typed the shortcut back (`addr`), which you didn't want when an expansion fired by accident. A `. , ! ?` that Auto Spacing moved after the expansion goes with it.
+
 ## v2.1.6
 
 ### New
