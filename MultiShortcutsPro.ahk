@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.1.7 - 2026
+; MULTISHORTCUTS PRO v2.1.8 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -87,6 +87,9 @@
 ; v2.1.7 (2026-11-15):
 ;   - Undo (Alt+Z, Space + Z) removes the expansion completely: the
 ;     shortcut is no longer typed back
+; v2.1.8 (2026-11-16):
+;   - Edit Shortcuts: "Save as New" in the Edit window saves the edited
+;     shortcut under a new name and keeps the original unchanged
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -108,7 +111,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.1.7"
+global appVersion := "2.1.8"
 
 global config := Map(
     "Hotkeys", Map(
@@ -3108,14 +3111,20 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
     editVal := gInline.Add("Edit", "x120 y42 w320 h70 +Multi +WantReturn", oldTarget)
     instSet := InstantSetFor(dataType = "launchers" ? launcherPath : textExpansionPath)
     instCb  := InstantCheckbox(gInline, "x120 y120", instSet.Has(oldShortcut))
-    gInline.Add("Button", "x120 y168 w100 h28", "Save")
-        .OnEvent("Click", SaveInlineEdit)
-    gInline.Add("Button", "x226 y168 w100 h28", "Cancel")
+    gInline.Add("Button", "x120 y168 w100 h28", "&Save")
+        .OnEvent("Click", (*) => SaveInlineEdit(false))
+    ; Save as New: the edited copy is added under a new name and the
+    ; original shortcut is left exactly as it was
+    gInline.Add("Button", "x226 y168 w110 h28", "Save as &New")
+        .OnEvent("Click", (*) => SaveInlineEdit(true))
+    gInline.Add("Button", "x342 y168 w98 h28", "Cancel")
         .OnEvent("Click", (*) => gInline.Destroy())
+    gInline.OnEvent("Escape", (*) => gInline.Destroy())
     gInline.Show("w490 h208")
     editSC.Focus()
 
-    SaveInlineEdit(*) {
+    SaveInlineEdit(asNew) {
+        gInline.Opt("+OwnDialogs")
         newShortcut := Trim(editSC.Value)
         instant     := StripInstantSuffix(&newShortcut) || instCb.Value
         ; Keep intentional leading/trailing spaces in expansions
@@ -3131,8 +3140,14 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
         ; A rename may not take a name that another shortcut already has
         ; (in either file) - that would silently replace it
         renamed := !(newShortcut == oldShortcut)
+        if (asNew && !renamed) {
+            MsgBox("Save as New keeps '" . oldShortcut . "' as it is and adds a copy " .
+                   "under a new name.`n`nType a different name in the Shortcut box first. " .
+                   "Nothing was changed.", "Pick a New Name", "Iconi")
+            editSC.Focus()
+            return
+        }
         if (renamed && (loadedLaunchers.Has(newShortcut) || loadedExpansions.Has(newShortcut))) {
-            gInline.Opt("+OwnDialogs")
             MsgBox("'" . newShortcut . "' is already used by another " .
                    (loadedLaunchers.Has(newShortcut) ? "launcher" : "text expansion") .
                    ".`n`nPick a different name, or delete that shortcut first. " .
@@ -3140,21 +3155,24 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
             return
         }
         if (dataType = "launchers") {
-            ; An unchanged target (rename only) keeps an older http:// / ftp:// link
-            if (!IsAllowedTarget(newTarget, "add", 0, (newTarget == Trim(oldTarget)) ? "existing" : ""))
+            ; An unchanged target (rename only) keeps an older http:// / ftp://
+            ; link. Save as New makes a new launcher, so it gets the full
+            ; checks for new launchers (ftp:// refused, http:// asked).
+            keep := (!asNew && newTarget == Trim(oldTarget)) ? "existing" : ""
+            if (!IsAllowedTarget(newTarget, "add", 0, keep))
                 return
-            if (renamed)
+            if (renamed && !asNew)
                 loadedLaunchers.Delete(oldShortcut)
             loadedLaunchers[newShortcut] := newTarget
-            SetInstantMark(instSet, oldShortcut, newShortcut, instant)
+            SetInstantMark(instSet, asNew ? "" : oldShortcut, newShortcut, instant)
             ok := RewriteFile(launcherPath, loadedLaunchers, "; Launcher file - Format: shortcut target")
             LoadLaunchers()
             RefreshLauncherTab(lv, searchCtrl, countCtrl)
         } else {
-            if (renamed)
+            if (renamed && !asNew)
                 loadedExpansions.Delete(oldShortcut)
             loadedExpansions[newShortcut] := newTarget
-            SetInstantMark(instSet, oldShortcut, newShortcut, instant)
+            SetInstantMark(instSet, asNew ? "" : oldShortcut, newShortcut, instant)
             ok := RewriteFile(textExpansionPath, loadedExpansions, "; Text Expansion file - Format: shortcut expansion")
             LoadTextExpansions()
             RefreshExpansionTab(lv, searchCtrl, countCtrl)
@@ -3162,13 +3180,17 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
         if (!ok)
             return               ; the file wasn't saved - keep the window open
         gInline.Destroy()
-        SavedNotice("Saved", newShortcut . " updated")
+        if (asNew)
+            SavedNotice("Saved as New", newShortcut . " added (" . oldShortcut . " kept)")
+        else
+            SavedNotice("Saved", newShortcut . " updated")
     }
 }
 
-; The $$ mark follows the shortcut through a rename, as the box says
+; The $$ mark follows the shortcut through a rename, as the box says.
+; oldName "" = a new shortcut (Save as New): the original's mark stays.
 SetInstantMark(instSet, oldName, newName, instant) {
-    if (instSet.Has(oldName))
+    if (oldName != "" && instSet.Has(oldName))
         instSet.Delete(oldName)
     if (instant)
         instSet[newName] := true

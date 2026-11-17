@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.1.8
+
+### New
+- **Save as New in Edit Shortcuts.** Open a shortcut with **Edit** (or double-click it), change the name and anything else, then click **Save as New** (Alt+N). The changed copy is added under the new name and the original stays exactly as it was. Handy for making `sig2` from `sig`, or a second address from the first.
+  - The new name can't be one that another shortcut already uses, and it has to differ from the original's name. Nothing is changed if it does.
+  - **Fire instantly** on the copy follows the box in the Edit window. The original keeps its own setting.
+  - A launcher copy gets the same checks as any new launcher: `ftp://` is refused and `http://` asks first.
+  - **Save** works as before: it changes (or renames) the shortcut you opened.
+
 ## v2.1.7
 
 ### Changed
