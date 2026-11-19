@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.2.0
+
+### New
+- **The toolbar.** A small bar that floats over your other windows, so making a shortcut is one click away:
+  - **+ New Shortcut** opens a short menu: text you type often, from selected text, an app, a website or email, a document or folder. Each item shows its Alt key, so the toolbar also teaches the keys.
+  - **My Shortcuts** opens Edit Shortcuts.
+  - **...** has the Quick Expansion Picker, Undo, Pause, the toolbar settings and Help.
+- **It never takes the focus.** Clicking it leaves your program in front with its selection, so **From selected text** works with the mouse, the same as Alt+C.
+- **Put it where it suits you:** right-click it, or tray menu → Settings → Toolbar.
+  - **Floating:** drag it by the `::` grip; it stays where you leave it. Dragging a docked toolbar makes it floating.
+  - **Top edge**, **Right edge** (buttons stacked) or **Beside the taskbar clock**.
+  - **Small, Normal or Large.**
+  - **Auto-hide at the screen edge** (docked positions): it folds into a thin tab and comes back when you point at the tab.
+  - With more than one screen, choose which screen a docked toolbar uses.
+- **It hides by itself while a program is full screen** (a video, a Zoom meeting, a slideshow) and comes back afterwards.
+- It's in Full mode and on by default. The first time, a note explains how to move or hide it. **Hide the toolbar** is under `...`; tray menu → Settings → Toolbar → Show the toolbar brings it back.
+- All the Alt keys and Space commands work as before.
+
 ## v2.1.10
 
 ### New

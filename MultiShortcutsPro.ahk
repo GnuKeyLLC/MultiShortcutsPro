@@ -113,6 +113,13 @@
 ;   - tray menu shortened to 8 lines: Add a Shortcut, Edit Shortcuts,
 ;     Snip, Pause/Resume, Settings, Tools, Help, Exit (Starter: Show
 ;     Built-in Shortcuts, Unlock, Settings, Tools, Help, Exit)
+; v2.2.0 (2026-11-18):
+;   - the toolbar (Full mode): + New Shortcut / My Shortcuts / ...
+;     floating over other windows. It never takes the focus, so "From
+;     selected text" works from a click. Positions: floating, top edge,
+;     right edge, beside the taskbar clock; Small / Normal / Large;
+;     auto-hide for docked positions; hides while a program is full
+;     screen. Tray > Settings > Toolbar, or right-click the toolbar.
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -134,6 +141,8 @@
 ;   Space+C  Capture Selection (Alt+C)      Space+X  Delete last word
 ;   Space+V  Screen clip (Alt+Shift+S)      Space+Z  Undo last expansion
 ;   plus 19 symbols (Space+J = ! ...)
+; TOOLBAR (Full mode): + New Shortcut, My Shortcuts, ... (more)
+;   right-click it, or tray > Settings > Toolbar, to move, resize or hide it
 ;================================================
 
 ;------------------------------------------------
@@ -141,7 +150,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.1.10"
+global appVersion := "2.2.0"
 
 global config := Map(
     "Hotkeys", Map(
@@ -332,6 +341,12 @@ global mouseSubMenu      := ""        ; the tray sub-menu (rebuilt with the tray
 global mouseItemOff      := "Off - normal middle click"
 global mouseItemAlt      := "Click = ``, hold = Alt   (like Caps Lock)"
 global mouseItemCtrl     := "Click = `;, hold = Ctrl   (like the semicolon)"
+; The toolbar (v2.2.0) - its settings and live state. See TOOLBAR.
+global tbar := {show: true, pos: "float", x: "", y: "", size: "m", autoHide: false,
+                mon: 0, seen: false, gui: "", tab: "", gripHwnd: 0, tips: Map(),
+                tipHwnd: 0, w: 0, h: 0, ax: 0, ay: 0, collapsed: false,
+                fsHidden: false, menuOpen: false, leaveTick: 0, lastExt: 0,
+                buttons: Map(), btnColor: "FFFFFF", hoverColor: "DCEFEC"}
 
 ;------------------------------------------------
 ; AUTO-RELOAD ON EXTERNAL FILE CHANGE
@@ -400,6 +415,7 @@ SafeInitialize() {
         LoadHoldKeysPrefs()
         LoadSecurityPrefs()
         LoadAutoTriggerPrefs()
+        LoadToolbarPrefs()
 
         ; Always set up the data files - seeding the built-in ; ` = families
         ; happens here. Starter mode users get them too.
@@ -438,6 +454,7 @@ SafeInitialize() {
         }
 
         SetupTrayMenu()
+        BuildToolbar()                          ; Full mode only (it checks)
         firstRun := CheckFirstRun()
         if (holdKeysNews && !firstRun)
             SetTimer(ShowHoldKeysNews, -1500)   ; after start-up, so it doesn't block it
@@ -571,7 +588,8 @@ ShowFullQuickStart(*) {
     msg .= "   " . HotkeyLabel(hk["AddLauncher"])         . "   Add an app`n"
     msg .= "   " . HotkeyLabel(hk["AddDocumentLauncher"]) . "   Add a document or folder`n"
     msg .= "   " . HotkeyLabel(hk["CaptureExpansion"])    . "   Turn selected text into a shortcut`n"
-    msg .= "   " . HotkeyLabel(hk["ShowEditGUI"])         . "   See and edit every shortcut`n`n"
+    msg .= "   " . HotkeyLabel(hk["ShowEditGUI"])         . "   See and edit every shortcut`n"
+    msg .= "   Or click + New Shortcut / My Shortcuts on the toolbar.`n`n"
     if (capsKeyOn)
         msg .= "Tip: hold Caps Lock + T is the same as Alt+T - no reach.`n`n"
     msg .= HoldKeysIntro()
@@ -698,6 +716,10 @@ BuildSettingsMenu() {
     global traySubMenus, holdKeysMenu, capsKeyMenu, appMode
     global privateTypingMenu, hidePreviewsMenu, allowCaptureMenu
     sm := Menu()
+    if (appMode = "full") {
+        sm.Add("Toolbar",                  BuildToolbarMenu())
+        sm.Add()
+    }
     sm.Add("Run on Windows Startup",       (*) => ToggleStartup())
     sm.Add("Sound Feedback",               (*) => ToggleSounds())
     sm.Add()
@@ -3711,7 +3733,8 @@ ShowFullHelp() {
     }
     gHelp.Add("Text", "x10 y" . y . " w480 h1 Background808080")
     y += 8
-    extras := ["Usage Statistics", "Export/Import CSV",
+    extras := ["Toolbar: + New Shortcut, My Shortcuts  (tray > Settings > Toolbar)",
+               "Usage Statistics", "Export/Import CSV",
                "Run on Windows Startup", "Backups auto-saved to .\backups\",
                "Shortcuts are saved as readable text - not for passwords or 2FA codes"]
     for item in extras {
@@ -5939,6 +5962,601 @@ ProcessIntegrity(pid) {
     }
     DllCall("CloseHandle", "Ptr", hProc)
     return level
+}
+
+;------------------------------------------------
+; TOOLBAR  (v2.2.0, Full mode)
+;------------------------------------------------
+; A small bar that floats over other windows:
+;   [::] [+ New Shortcut] [My Shortcuts] [...]
+; New Shortcut opens a short menu (text, from selected text, app, website,
+; document); My Shortcuts opens Edit Shortcuts; ... has the rest.
+;
+; It never takes the focus. The window has WS_EX_NOACTIVATE (0x08000000),
+; so clicking a button leaves the program you were typing in active, with
+; its selection. That is what lets "From selected text" (Alt+C) work from
+; a click. Its menus do take the focus for a moment (Windows needs that to
+; show a menu), so the window that was active is put back as soon as a
+; menu closes, before the chosen command runs.
+;
+; Positions (tray > Settings > Toolbar, or right-click the toolbar):
+;   float    drag it anywhere (by the :: grip); remembered
+;   top      top edge, centered
+;   right    right edge, buttons stacked
+;   taskbar  the corner beside the clock
+; Docked positions can auto-hide to a thin tab at the edge; pointing at
+; the tab brings the bar back. In every position the bar hides while a
+; program is full screen (a video, a Zoom meeting, a slideshow).
+;
+; Saved in prefs.ini [Toolbar]: Show=1|0, Position, X, Y, Size=s|m|l,
+; AutoHide=1|0, Monitor (0 = the main screen), Seen=1 (intro shown).
+; Every window position here is in real screen pixels (GetWindowRect /
+; SetWindowPos), whatever the display scaling.
+
+LoadToolbarPrefs() {
+    global prefsPath, tbar
+    if (!FileExist(prefsPath))
+        return                                  ; new install: the defaults
+    try {
+        tbar.show     := (IniRead(prefsPath, "Toolbar", "Show", "1") = "1")
+        p             := IniRead(prefsPath, "Toolbar", "Position", "float")
+        tbar.pos      := (p = "top" || p = "right" || p = "taskbar") ? p : "float"
+        tbar.x        := IniRead(prefsPath, "Toolbar", "X", "")
+        tbar.y        := IniRead(prefsPath, "Toolbar", "Y", "")
+        s             := IniRead(prefsPath, "Toolbar", "Size", "m")
+        tbar.size     := (s = "s" || s = "l") ? s : "m"
+        tbar.autoHide := (IniRead(prefsPath, "Toolbar", "AutoHide", "0") = "1")
+        mon           := IniRead(prefsPath, "Toolbar", "Monitor", "0")
+        tbar.mon      := IsInteger(mon) ? Integer(mon) : 0
+        tbar.seen     := (IniRead(prefsPath, "Toolbar", "Seen", "0") = "1")
+    }
+}
+
+SaveToolbarPrefs() {
+    global prefsPath, tbar
+    try {
+        IniWrite(tbar.show ? "1" : "0",     prefsPath, "Toolbar", "Show")
+        IniWrite(tbar.pos,                  prefsPath, "Toolbar", "Position")
+        IniWrite(tbar.x,                    prefsPath, "Toolbar", "X")
+        IniWrite(tbar.y,                    prefsPath, "Toolbar", "Y")
+        IniWrite(tbar.size,                 prefsPath, "Toolbar", "Size")
+        IniWrite(tbar.autoHide ? "1" : "0", prefsPath, "Toolbar", "AutoHide")
+        IniWrite(tbar.mon,                  prefsPath, "Toolbar", "Monitor")
+    }
+}
+
+ToolbarSizeSpec() {
+    global tbar
+    switch tbar.size {
+        case "s": return {font: 8,  h: 24, wNew: 112, wMy: 94,  grip: 12}
+        case "l": return {font: 12, h: 38, wNew: 168, wMy: 140, grip: 18}
+    }
+    return {font: 10, h: 30, wNew: 136, wMy: 114, grip: 14}
+}
+
+; Builds (or rebuilds) the toolbar from the settings. Safe to call any time.
+BuildToolbar(*) {
+    global tbar, appMode
+    static hooked := false
+    DestroyToolbar()
+    if (!tbar.show || appMode != "full")
+        return
+    if (!hooked) {
+        OnMessage(0x0200, ToolbarMouseMove)     ; WM_MOUSEMOVE: button tips
+        OnMessage(0x0201, ToolbarLButtonDown)   ; WM_LBUTTONDOWN: drag by the grip
+        OnMessage(0x0232, ToolbarMoved)         ; WM_EXITSIZEMOVE: a drag ended
+        OnMessage(0x007E, (*) => SetTimer(BuildToolbar, -1500))  ; screens changed
+        OnMessage(0x0021, ToolbarMouseActivate) ; WM_MOUSEACTIVATE: never activate
+        hooked := true
+    }
+    sz       := ToolbarSizeSpec()
+    vertical := (tbar.pos = "right")
+    g := Gui("+AlwaysOnTop +ToolWindow -Caption +Border +E0x08000000", "MultiShortcuts Toolbar")
+    g.BackColor := "F3F5F7"
+    g.MarginX := 4, g.MarginY := 4
+    g.SetFont("s" . sz.font, "Segoe UI")
+    ; The grip: 0x200 = text centered top to bottom, 0x100 = gets mouse messages
+    if (vertical)
+        grip := g.Add("Text", "xm ym w" . sz.wNew . " h" . sz.grip . " Center +0x300 c8A8F98", "· · ·")
+    else
+        grip := g.Add("Text", "xm ym w" . sz.grip . " h" . sz.h . " Center +0x300 c8A8F98", "::")
+    ; The buttons are Text controls drawn as buttons: a real Button control
+    ; takes the keyboard focus when clicked, and that activates its window
+    ; even with WS_EX_NOACTIVATE - the selection in your program would be
+    ; left behind. A Text control never takes the focus.
+    nextPos := vertical ? "xm y+4" : "x+4 yp"
+    btnOpt  := " h" . sz.h . " Center +0x200 +Border Background" . tbar.btnColor
+    btnNew  := g.Add("Text", nextPos . " w" . sz.wNew . btnOpt, "+  New Shortcut")
+    btnNew.SetFont("bold")
+    btnMy   := g.Add("Text", nextPos . " w" . (vertical ? sz.wNew : sz.wMy) . btnOpt, "My Shortcuts")
+    btnMore := g.Add("Text", nextPos . " w" . (vertical ? sz.wNew : sz.h) . btnOpt, vertical ? "More..." : "...")
+    tbar.buttons := Map(btnNew.Hwnd, btnNew, btnMy.Hwnd, btnMy, btnMore.Hwnd, btnMore)
+    btnNew.OnEvent("Click", ToolbarNewClick)
+    btnMy.OnEvent("Click",  (*) => RunCommand(() => ShowEditGUI("launchers")))
+    btnMore.OnEvent("Click", ToolbarMoreClick)
+    g.OnEvent("ContextMenu", ToolbarContextMenu)
+
+    hk := config["Hotkeys"]
+    tbar.tips := Map(
+        btnNew.Hwnd,  "Make a new shortcut   (" . HotkeyLabel(hk["AddExpansion"]) . " text,  "
+                      . HotkeyLabel(hk["CaptureExpansion"]) . " selected text)",
+        btnMy.Hwnd,   "See and edit all your shortcuts   (" . HotkeyLabel(hk["ShowEditGUI"]) . ")",
+        btnMore.Hwnd, "More: Quick Picker, Undo, Pause, toolbar settings",
+        grip.Hwnd,    "Drag to move.  Right-click for position and size.")
+    tbar.gripHwnd := grip.Hwnd
+    tbar.gui := g
+    g.Show("Hide AutoSize")
+    WinRect(g.Hwnd, &x, &y, &w, &h)
+    tbar.w := w, tbar.h := h
+    ToolbarAnchor(&x, &y)
+    tbar.ax := x, tbar.ay := y
+    PlaceWindow(g.Hwnd, x, y)
+    tbar.collapsed := false
+    tbar.fsHidden  := false
+    tbar.leaveTick := 0
+    if (tbar.autoHide && tbar.pos != "float") {
+        BuildToolbarTab()
+        ToolbarCollapse()
+    } else {
+        g.Show("NA")
+    }
+    SetTimer(ToolbarTick, 250)
+    if (!tbar.seen)
+        SetTimer(ToolbarIntro, -2500)          ; after the start-up notices
+}
+
+DestroyToolbar() {
+    global tbar
+    SetTimer(ToolbarTick, 0)
+    ToolTip(, , , 19)
+    for , k in ["gui", "tab"] {
+        if (IsObject(tbar.%k%))
+            try tbar.%k%.Destroy()
+        tbar.%k% := ""
+    }
+    tbar.tipHwnd := 0
+}
+
+; One time only: what the bar is and how to move or hide it
+ToolbarIntro() {
+    global tbar, prefsPath
+    if (!IsObject(tbar.gui) || tbar.seen)
+        return
+    tbar.seen := true
+    try IniWrite("1", prefsPath, "Toolbar", "Seen")
+    WinRect(tbar.gui.Hwnd, &x, &y, &w, &h)
+    CoordMode("ToolTip", "Screen")
+    msg := "New: the MultiShortcuts toolbar.`n"
+    msg .= "Click New Shortcut to make one, or My Shortcuts to see them all.`n"
+    msg .= "Drag the " . (tbar.pos = "right" ? "dots" : ":: grip") . " to move it. Right-click it for positions and size,`n"
+    msg .= "or to hide it (tray menu > Settings > Toolbar brings it back)."
+    tipY := (y > A_ScreenHeight // 2) ? y - 90 : y + h + 6
+    ToolTip(msg, x, tipY, 18)
+    SetTimer(() => ToolTip(, , , 18), -12000)
+}
+
+; The window's real position and size in pixels (also while it is hidden)
+WinRect(hwnd, &x, &y, &w, &h) {
+    rc := Buffer(16, 0)
+    DllCall("GetWindowRect", "Ptr", hwnd, "Ptr", rc)
+    x := NumGet(rc, 0, "Int"), y := NumGet(rc, 4, "Int")
+    w := NumGet(rc, 8, "Int") - x, h := NumGet(rc, 12, "Int") - y
+}
+
+; Moves a window without activating it, keeping it on top (pixels)
+PlaceWindow(hwnd, x, y, w := 0, h := 0) {
+    flags := 0x0010 | ((w = 0 && h = 0) ? 0x0001 : 0)   ; NOACTIVATE, NOSIZE
+    DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1, "Int", x, "Int", y,
+            "Int", w, "Int", h, "UInt", flags)
+}
+
+; The screen the docked toolbar uses (the main one unless chosen)
+ToolbarMonitor() {
+    global tbar
+    n := tbar.mon
+    if (n < 1 || n > MonitorGetCount())
+        n := MonitorGetPrimary()
+    return n
+}
+
+; Which side of the screen the taskbar is on (auto-hidden: bottom)
+TaskbarSide(n) {
+    MonitorGet(n, &ml, &mt, &mr, &mb)
+    MonitorGetWorkArea(n, &l, &t, &r, &b)
+    return (b < mb) ? "bottom" : (r < mr) ? "right" : (t > mt) ? "top" : (l > ml) ? "left" : "bottom"
+}
+
+; Where the toolbar goes for its position setting
+ToolbarAnchor(&x, &y) {
+    global tbar
+    w := tbar.w, h := tbar.h
+    n := ToolbarMonitor()
+    MonitorGetWorkArea(n, &l, &t, &r, &b)
+    switch tbar.pos {
+        case "top":
+            x := l + (r - l - w) // 2, y := t
+        case "right":
+            x := r - w, y := t + (b - t - h) // 2
+        case "taskbar":
+            side := TaskbarSide(n)
+            x := (side = "left") ? l : r - w
+            y := (side = "top") ? t : b - h
+        default:
+            ; Floating: where it was left - unless that spot is no longer on
+            ; any screen (a monitor was unplugged), then top right of the main one
+            x := tbar.x, y := tbar.y
+            if (!IsInteger(x) || !IsInteger(y) || !PointOnAnyScreen(x + 20, y + 10)) {
+                MonitorGetWorkArea(MonitorGetPrimary(), &l, &t, &r, &b)
+                x := r - w - 40, y := t + 40
+            }
+            x := Integer(x), y := Integer(y)
+    }
+}
+
+PointOnAnyScreen(px, py) {
+    loop MonitorGetCount() {
+        MonitorGetWorkArea(A_Index, &l, &t, &r, &b)
+        if (px >= l && px < r && py >= t && py < b)
+            return true
+    }
+    return false
+}
+
+; The thin tab an auto-hidden toolbar leaves at the screen edge
+BuildToolbarTab() {
+    global tbar
+    long := 72, thin := 7
+    n := ToolbarMonitor()
+    MonitorGetWorkArea(n, &l, &t, &r, &b)
+    switch tbar.pos {
+        case "top":
+            tw := long, th := thin, tx := tbar.ax + (tbar.w - long) // 2, ty := t
+        case "right":
+            tw := thin, th := long, tx := r - thin, ty := tbar.ay + (tbar.h - long) // 2
+        default:                                ; taskbar corner
+            side := TaskbarSide(n)
+            tw := long, th := thin
+            tx := (side = "left") ? l + 8 : r - long - 8
+            ty := (side = "top") ? t : b - thin
+    }
+    g := Gui("+AlwaysOnTop +ToolWindow -Caption +E0x08000000 -DPIScale", "MultiShortcuts Toolbar Tab")
+    g.BackColor := "00897B"
+    g.Show("NA Hide w" . tw . " h" . th)
+    PlaceWindow(g.Hwnd, tx, ty, tw, th)
+    tbar.tab := g
+    tbar.tips[g.Hwnd] := "MultiShortcuts toolbar - point here to show it"
+}
+
+ToolbarCollapse() {
+    global tbar
+    ToolTip(, , , 19)
+    tbar.gui.Hide()
+    tbar.tab.Show("NA")
+    tbar.collapsed := true
+}
+
+ToolbarExpand() {
+    global tbar
+    tbar.tab.Hide()
+    PlaceWindow(tbar.gui.Hwnd, tbar.ax, tbar.ay)
+    tbar.gui.Show("NA")
+    tbar.collapsed := false
+    tbar.leaveTick := 0
+}
+
+; Four times a second: full-screen check, button tips, auto-hide
+ToolbarTick() {
+    global tbar
+    if (!IsObject(tbar.gui)) {
+        SetTimer(ToolbarTick, 0)
+        return
+    }
+    if (ActiveIsFullScreen()) {
+        if (!tbar.fsHidden) {
+            tbar.fsHidden := true
+            ToolTip(, , , 19)
+            tbar.gui.Hide()
+            if (IsObject(tbar.tab))
+                tbar.tab.Hide()
+        }
+        return
+    }
+    if (tbar.fsHidden) {
+        tbar.fsHidden := false
+        if (tbar.collapsed)
+            tbar.tab.Show("NA")
+        else
+            tbar.gui.Show("NA")
+    }
+    ; The last window you were in that isn't this script's - where the
+    ; toolbar's commands go (see ToolbarTarget)
+    a := WinExist("A")
+    try {
+        if (a && WinGetPID("ahk_id " . a) != DllCall("GetCurrentProcessId", "UInt"))
+            tbar.lastExt := a
+    }
+    CoordMode("Mouse", "Screen")
+    MouseGetPos(&mx, &my, &mwin, &mctl, 2)
+    if (tbar.tipHwnd && mctl != tbar.tipHwnd && mwin != tbar.tipHwnd) {
+        ToolTip(, , , 19)
+        tbar.tipHwnd := 0
+        ToolbarHover(0)
+    }
+    if (!tbar.autoHide || tbar.pos = "float" || tbar.menuOpen || !IsObject(tbar.tab))
+        return
+    if (tbar.collapsed) {
+        if (mwin = tbar.tab.Hwnd)
+            ToolbarExpand()
+        return
+    }
+    WinRect(tbar.gui.Hwnd, &x, &y, &w, &h)
+    if (mx >= x - 12 && mx < x + w + 12 && my >= y - 12 && my < y + h + 12)
+        tbar.leaveTick := 0
+    else if (!tbar.leaveTick)
+        tbar.leaveTick := A_TickCount
+    else if (A_TickCount - tbar.leaveTick > 700)
+        ToolbarCollapse()
+}
+
+; True while the active window fills a whole screen with no title bar
+; (a video, a game, a Zoom meeting in full screen, a slideshow). A
+; maximized window keeps its title bar, so the toolbar stays for those.
+ActiveIsFullScreen() {
+    hwnd := WinExist("A")
+    if (!hwnd)
+        return false
+    try {
+        cls := WinGetClass("ahk_id " . hwnd)
+        if (cls = "Progman" || cls = "WorkerW" || cls = "Shell_TrayWnd")
+            return false                        ; the desktop and taskbar
+        if (WinGetPID("ahk_id " . hwnd) = DllCall("GetCurrentProcessId", "UInt"))
+            return false                        ; this script's own windows
+        if (WinGetStyle("ahk_id " . hwnd) & 0xC00000)
+            return false                        ; has a title bar
+        WinRect(hwnd, &x, &y, &w, &h)
+    } catch {
+        return false
+    }
+    loop MonitorGetCount() {
+        MonitorGet(A_Index, &l, &t, &r, &b)
+        if (x <= l && y <= t && x + w >= r && y + h >= b)
+            return true
+    }
+    return false
+}
+
+; Button tips (a tooltip near the pointer)
+ToolbarMouseMove(wParam, lParam, msg, hwnd) {
+    global tbar
+    if (!IsObject(tbar.gui) || tbar.menuOpen || !tbar.tips.Has(hwnd) || hwnd = tbar.tipHwnd)
+        return
+    ToolbarHover(hwnd)
+    tbar.tipHwnd := hwnd
+    CoordMode("Mouse", "Screen")
+    CoordMode("ToolTip", "Screen")
+    MouseGetPos(&mx, &my)
+    ToolTip(tbar.tips[hwnd], mx + 14, my + 24, 19)
+}
+
+; Pressing on the grip (or the bar between buttons) drags the window
+ToolbarLButtonDown(wParam, lParam, msg, hwnd) {
+    global tbar
+    if (!IsObject(tbar.gui) || (hwnd != tbar.gripHwnd && hwnd != tbar.gui.Hwnd))
+        return
+    ToolTip(, , , 19)
+    tbar.tipHwnd := 0
+    PostMessage(0xA1, 2, 0, , "ahk_id " . tbar.gui.Hwnd)   ; WM_NCLBUTTONDOWN, HTCAPTION
+    return 0
+}
+
+; A drag ended: remember the spot. Dragging a docked bar makes it floating.
+ToolbarMoved(wParam, lParam, msg, hwnd) {
+    global tbar
+    if (!IsObject(tbar.gui) || hwnd != tbar.gui.Hwnd)
+        return
+    WinRect(hwnd, &x, &y, &w, &h)
+    tbar.x := x, tbar.y := y
+    tbar.ax := x, tbar.ay := y
+    if (tbar.pos != "float") {
+        tbar.pos := "float"
+        SaveToolbarPrefs()
+        SetTimer(ToolbarSettingsChanged, -10)   ; rebuild: a stacked bar lies flat again
+        return
+    }
+    SaveToolbarPrefs()
+}
+
+; Shows a toolbar menu under a button, then gives the focus back to the
+; window that had it (Windows moves the focus to this script to show a
+; menu). A chosen command runs a moment later (RunCommand), after that.
+ToolbarShowMenu(m, ctrl, target) {
+    global tbar
+    ToolTip(, , , 19)
+    tbar.tipHwnd := 0
+    ToolbarHover(0)
+    WinRect(ctrl.Hwnd, &x, &y, &w, &h)
+    CoordMode("Menu", "Screen")
+    tbar.menuOpen := true
+    try m.Show(x, y + h)
+    tbar.menuOpen := false
+    RestoreFocus(target)
+}
+
+; The program you were in: the active window, unless that is one of this
+; script's own windows - then the last other window that was active
+ToolbarTarget() {
+    global tbar
+    a := WinExist("A")
+    try {
+        if (a && WinGetPID("ahk_id " . a) != DllCall("GetCurrentProcessId", "UInt"))
+            return a
+    }
+    return (tbar.lastExt && WinExist("ahk_id " . tbar.lastExt)) ? tbar.lastExt : 0
+}
+
+; A click on the toolbar or its tab never activates it (MA_NOACTIVATE)
+ToolbarMouseActivate(wParam, lParam, msg, hwnd) {
+    global tbar
+    if (IsObject(tbar.gui) && hwnd = tbar.gui.Hwnd)
+        return 3
+    if (IsObject(tbar.tab) && hwnd = tbar.tab.Hwnd)
+        return 3
+}
+
+; The button under the pointer is shaded (hwnd 0 = none)
+ToolbarHover(hwnd) {
+    global tbar
+    static lit := 0
+    if (hwnd = lit)
+        return
+    for h, c in tbar.buttons {
+        if (h = lit || h = hwnd) {
+            try {
+                c.Opt("+Background" . (h = hwnd ? tbar.hoverColor : tbar.btnColor))
+                c.Redraw()
+            }
+        }
+    }
+    lit := tbar.buttons.Has(hwnd) ? hwnd : 0
+}
+
+RestoreFocus(target) {
+    global tbar
+    if (!target || !WinExist("ahk_id " . target))
+        return
+    if (IsObject(tbar.gui) && target = tbar.gui.Hwnd)
+        return
+    try {
+        WinActivate("ahk_id " . target)
+        WinWaitActive("ahk_id " . target, , 0.5)
+    }
+}
+
+ToolbarNewClick(ctrl, *) {
+    global config
+    target := ToolbarTarget()
+    hk := config["Hotkeys"]
+    m := Menu()
+    m.Add("&Text you type often`t" . HotkeyLabel(hk["AddExpansion"]),   (*) => RunCommand(AddNewExpansion))
+    m.Add("&From selected text`t" . HotkeyLabel(hk["CaptureExpansion"]), (*) => RunCommand(() => CaptureFromWindow(target)))
+    m.Add()
+    m.Add("&App`t" . HotkeyLabel(hk["AddLauncher"]),                  (*) => RunCommand(AddNewLauncher))
+    m.Add("&Website or email`t" . HotkeyLabel(hk["AddWebLauncher"]),  (*) => RunCommand(AddWebLauncher))
+    m.Add("&Document or folder`t" . HotkeyLabel(hk["AddDocumentLauncher"]), (*) => RunCommand(AddDocumentLauncher))
+    ToolbarShowMenu(m, ctrl, target)
+}
+
+; "From selected text": the selection is in the window that was active
+; before the click - make sure it is in front, then capture as Alt+C does
+CaptureFromWindow(target) {
+    RestoreFocus(target)
+    Sleep(50)
+    CaptureSelectedText()
+}
+
+ToolbarMoreClick(ctrl, *) {
+    global config
+    target := ToolbarTarget()
+    hk := config["Hotkeys"]
+    m := Menu()
+    m.Add("&Quick Expansion Picker`t" . HotkeyLabel(hk["QuickTextExpansion"]), (*) => RunCommand(QuickTextExpansion))
+    m.Add("&Undo Last Expansion`t" . HotkeyLabel(hk["UndoExpansion"]),         (*) => RunCommand(UndoLastExpansion))
+    m.Add((A_IsSuspended ? "&Resume shortcuts`t" : "&Pause shortcuts`t") . HotkeyLabel(hk["PauseResume"]),
+          (*) => ToggleMacrosPause())
+    m.Add()
+    m.Add("Toolbar", BuildToolbarMenu(true))
+    m.Add("&Hide the toolbar", (*) => SetToolbarShown(false))
+    m.Add()
+    m.Add("&Help`t" . HotkeyLabel(hk["ShowHelp"]), (*) => RunCommand(ShowHelp))
+    ToolbarShowMenu(m, ctrl, target)
+}
+
+ToolbarContextMenu(guiObj, ctrlObj, item, isRightClick, x, y) {
+    global tbar
+    target := ToolbarTarget()
+    ToolTip(, , , 19)
+    m := BuildToolbarMenu(true)
+    m.Add()
+    m.Add("&Hide the toolbar", (*) => SetToolbarShown(false))
+    CoordMode("Menu", "Screen")
+    CoordMode("Mouse", "Screen")
+    MouseGetPos(&mx, &my)
+    tbar.menuOpen := true
+    try m.Show(mx, my)
+    tbar.menuOpen := false
+    RestoreFocus(target)
+}
+
+; The toolbar's settings - the same menu in the tray (Settings > Toolbar),
+; under ... and on a right-click. Built fresh each time, so ticks are right.
+; onBar = shown from the toolbar itself, which has "Hide the toolbar" instead
+BuildToolbarMenu(onBar := false) {
+    global tbar
+    m := Menu()
+    if (!onBar) {
+        m.Add("Show the toolbar", (*) => SetToolbarShown(!tbar.show))
+        if (tbar.show)
+            m.Check("Show the toolbar")
+        m.Add()
+    }
+    pm := Menu()
+    for , p in [["float",   "Floating - drag it anywhere"],
+                ["top",     "Top edge, centered"],
+                ["right",   "Right edge, buttons stacked"],
+                ["taskbar", "Beside the taskbar clock"]] {
+        pm.Add(p[2], SetToolbarSetting.Bind("pos", p[1]))
+        if (tbar.pos = p[1])
+            pm.Check(p[2])
+    }
+    m.Add("Position", pm)
+    szm := Menu()
+    for , s in [["s", "Small"], ["m", "Normal"], ["l", "Large"]] {
+        szm.Add(s[2], SetToolbarSetting.Bind("size", s[1]))
+        if (tbar.size = s[1])
+            szm.Check(s[2])
+    }
+    m.Add("Size", szm)
+    ah := "Auto-hide at the screen edge (docked positions)"
+    m.Add(ah, SetToolbarSetting.Bind("autoHide", !tbar.autoHide))
+    if (tbar.autoHide)
+        m.Check(ah)
+    if (tbar.pos = "float")
+        m.Disable(ah)
+    if (MonitorGetCount() > 1) {
+        mm := Menu()
+        prim := MonitorGetPrimary()
+        cur  := ToolbarMonitor()
+        loop MonitorGetCount() {
+            label := "Screen " . A_Index . (A_Index = prim ? " (main)" : "")
+            mm.Add(label, SetToolbarSetting.Bind("mon", A_Index = prim ? 0 : A_Index))
+            if (A_Index = cur)
+                mm.Check(label)
+        }
+        m.Add("Screen (docked positions)", mm)
+    }
+    return m
+}
+
+SetToolbarSetting(key, value, *) {
+    global tbar
+    tbar.%key% := value
+    SetTimer(ToolbarSettingsChanged, -10)
+}
+
+SetToolbarShown(on, *) {
+    global tbar
+    tbar.show := on
+    SetTimer(ToolbarSettingsChanged, -10)
+    if (!on)
+        TrayTip("Toolbar Hidden",
+                "Bring it back any time: tray menu > Settings > Toolbar > Show the toolbar.", "Iconi")
+}
+
+; Save, rebuild the bar, and rebuild the tray menu so its ticks match
+ToolbarSettingsChanged() {
+    SaveToolbarPrefs()
+    BuildToolbar()
+    SetupTrayMenu()
 }
 
 ;------------------------------------------------
