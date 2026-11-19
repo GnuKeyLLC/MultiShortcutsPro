@@ -6420,16 +6420,34 @@ ToolbarHover(hwnd) {
     lit := tbar.buttons.Has(hwnd) ? hwnd : 0
 }
 
+; Puts the window back in front. True only if it really is in front now.
 RestoreFocus(target) {
     global tbar
     if (!target || !WinExist("ahk_id " . target))
-        return
+        return false
     if (IsObject(tbar.gui) && target = tbar.gui.Hwnd)
-        return
+        return false
     try {
-        WinActivate("ahk_id " . target)
+        if (!WinActive("ahk_id " . target))
+            WinActivate("ahk_id " . target)
         WinWaitActive("ahk_id " . target, , 0.5)
     }
+    return WinActive("ahk_id " . target) ? true : false
+}
+
+; For toolbar commands that type or read keys in your program (Undo, the
+; Quick Picker, From selected text): they run only if that program is back
+; in front. Otherwise - it closed, or Windows wouldn't bring it forward -
+; nothing is sent, so backspaces or expansion text can't land in some
+; other window.
+ToolbarRunInTarget(fn, target) {
+    if (!RestoreFocus(target)) {
+        TrayTip("Nothing Sent",
+                "Your program isn't in front any more. Click back into it and try again.", "Iconi")
+        return
+    }
+    Sleep(50)
+    fn()
 }
 
 ToolbarNewClick(ctrl, *) {
@@ -6438,7 +6456,7 @@ ToolbarNewClick(ctrl, *) {
     hk := config["Hotkeys"]
     m := Menu()
     m.Add("&Text you type often`t" . HotkeyLabel(hk["AddExpansion"]),   (*) => RunCommand(AddNewExpansion))
-    m.Add("&From selected text`t" . HotkeyLabel(hk["CaptureExpansion"]), (*) => RunCommand(() => CaptureFromWindow(target)))
+    m.Add("&From selected text`t" . HotkeyLabel(hk["CaptureExpansion"]), (*) => RunCommand(() => ToolbarRunInTarget(CaptureSelectedText, target)))
     m.Add()
     m.Add("&App`t" . HotkeyLabel(hk["AddLauncher"]),                  (*) => RunCommand(AddNewLauncher))
     m.Add("&Website or email`t" . HotkeyLabel(hk["AddWebLauncher"]),  (*) => RunCommand(AddWebLauncher))
@@ -6446,21 +6464,13 @@ ToolbarNewClick(ctrl, *) {
     ToolbarShowMenu(m, ctrl, target)
 }
 
-; "From selected text": the selection is in the window that was active
-; before the click - make sure it is in front, then capture as Alt+C does
-CaptureFromWindow(target) {
-    RestoreFocus(target)
-    Sleep(50)
-    CaptureSelectedText()
-}
-
 ToolbarMoreClick(ctrl, *) {
     global config
     target := ToolbarTarget()
     hk := config["Hotkeys"]
     m := Menu()
-    m.Add("&Quick Expansion Picker`t" . HotkeyLabel(hk["QuickTextExpansion"]), (*) => RunCommand(QuickTextExpansion))
-    m.Add("&Undo Last Expansion`t" . HotkeyLabel(hk["UndoExpansion"]),         (*) => RunCommand(UndoLastExpansion))
+    m.Add("&Quick Expansion Picker`t" . HotkeyLabel(hk["QuickTextExpansion"]), (*) => RunCommand(() => ToolbarRunInTarget(QuickTextExpansion, target)))
+    m.Add("&Undo Last Expansion`t" . HotkeyLabel(hk["UndoExpansion"]),         (*) => RunCommand(() => ToolbarRunInTarget(UndoLastExpansion, target)))
     m.Add((A_IsSuspended ? "&Resume shortcuts`t" : "&Pause shortcuts`t") . HotkeyLabel(hk["PauseResume"]),
           (*) => ToggleMacrosPause())
     m.Add()

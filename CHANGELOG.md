@@ -8,6 +8,7 @@
   - **My Shortcuts** opens Edit Shortcuts.
   - **...** has the Quick Expansion Picker, Undo, Pause, the toolbar settings and Help.
 - **It never takes the focus.** Clicking it leaves your program in front with its selection, so **From selected text** works with the mouse, the same as Alt+C.
+- **Safe when your program goes away.** Undo, the Quick Picker and From selected text run from the toolbar only if your program is really back in front. If it closed, or Windows wouldn't bring it forward, nothing is typed or deleted; a notice asks you to click back into it.
 - **Put it where it suits you:** right-click it, or tray menu → Settings → Toolbar.
   - **Floating:** drag it by the `::` grip; it stays where you leave it. Dragging a docked toolbar makes it floating.
   - **Top edge**, **Right edge** (buttons stacked) or **Beside the taskbar clock**.
