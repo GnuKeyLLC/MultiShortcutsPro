@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.1.9 - 2026
+; MULTISHORTCUTS PRO v2.1.10 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -103,6 +103,16 @@
 ;   - old shortcut|text files whose text has spaces are now converted
 ;     (before, those lines were skipped and then failed to load)
 ;   - text that already ends in a space gets no second space
+; v2.1.10 (2026-11-18):
+;   - Space bar commands (hold Space + a letter, with "Hold for symbols"
+;     on): F = Add text expansion (Alt+T), C = Capture selection (Alt+C),
+;     V = Screen clip (Alt+Shift+S). They run when Space is let go.
+;     F and C are Full mode only. All the Alt keys still work.
+;   - Space + B = Backspace (it was Space + R); Space + Y = ^ (it was
+;     Space + C, which now captures, like Alt+C)
+;   - tray menu shortened to 8 lines: Add a Shortcut, Edit Shortcuts,
+;     Snip, Pause/Resume, Settings, Tools, Help, Exit (Starter: Show
+;     Built-in Shortcuts, Unlock, Settings, Tools, Help, Exit)
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -117,6 +127,13 @@
 ;   Alt+P  Pause/Resume
 ;   Alt+H  Help
 ;   Alt+R  Reload
+;   Alt+Shift+S  Screen clip (Snip)
+; SPACE BAR (hold Space + a letter, tray > Settings > Space bar >
+; Hold for symbols):
+;   Space+F  Add Text Expansion (Alt+T)     Space+B  Backspace
+;   Space+C  Capture Selection (Alt+C)      Space+X  Delete last word
+;   Space+V  Screen clip (Alt+Shift+S)      Space+Z  Undo last expansion
+;   plus 19 symbols (Space+J = ! ...)
 ;================================================
 
 ;------------------------------------------------
@@ -124,7 +141,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.1.9"
+global appVersion := "2.1.10"
 
 global config := Map(
     "Hotkeys", Map(
@@ -284,7 +301,7 @@ global spaceSymbolList := [
     ["s", "*"],     ; Star
     ["n", "&"],     ; a-N-d
     ["u", "_"],     ; Underscore
-    ["c", "^"],     ; Caret
+    ["y", "^"],     ; Caret - Y sits under the 6 key, and ^ is Shift+6 (was C before v2.1.10)
     [",", "<"],     ; the comma key - < is printed on it
     [".", ">"]      ; the period key - > is printed on it
 ]
@@ -292,11 +309,21 @@ global spaceSymbolList := [
 ; Kept apart from spaceSymbolList, so "19 symbols" stays true and the
 ; help lists them on their own line. Letters must not be in the list above.
 global spaceEditList := [
-    ["r", "{BS}",  "Backspace"],   ; left index, top row - R for Remove
+    ["b", "{BS}",  "Backspace"],   ; left index, bottom row - B for Back (was R before v2.1.10)
     ; X: select the word before the cursor, then delete it. Not Ctrl+Backspace:
     ; older Windows text boxes type a box character for that instead.
     ["x", "^+{Left}{BS}", "Delete word"],  ; left ring, bottom row - X to cross it out
     ["z", "undo", "Undo expansion"]        ; left pinky, bottom row - Z = undo, like Alt+Z
+]
+; Hold Space, then tap the letter: a command, the same as its Alt key.
+; The command starts once Space is let go (RunCommand), so its window
+; never opens while keys are still being held back. "full" = Full mode
+; only (in Starter the letter types normally, after a space).
+; Letters must not be in spaceSymbolList or spaceEditList.
+global spaceCmdList := [
+    ["f", "add",     "Add text expansion", "Alt+T", "full"],   ; F = Fast
+    ["c", "capture", "Capture selection",  "Alt+C", "full"],   ; C = Capture, like Alt+C
+    ["v", "snip",    "Screen clip",        "Alt+Shift+S", ""]  ; V = open scissors
 ]
 global mouseKeyOn        := false     ; middle mouse button in use (on by default, like ;)
 global mouseKeyMode      := "ctrl"    ; "alt"  = click types `, hold = Alt   (like Caps Lock)
@@ -497,10 +524,12 @@ HoldKeysIntro() {
         msg .= "      Shift + middle click = the normal middle click.`n"
     if (spaceSymOn && spaceMode = "shift")
         msg .= "   SPACE BAR:  hold, then a letter = a capital (works like Shift)`n"
-    else if (spaceSymOn)
+    else if (spaceSymOn) {
         msg .= "   SPACE BAR:  hold + a letter = a symbol (J = !  K = ?  A = @ ...),`n"
-        msg .= "      R = Backspace,  X = delete the last word,  Z = undo the last expansion`n"
-    msg .= "`nCHANGE ANY OF IT - right-click the tray icon:`n"
+        msg .= "      B = Backspace,  X = delete the last word,  Z = undo the last expansion`n"
+        msg .= "      " . SpaceCmdLine("eq") . "   (when you let go of Space)`n"
+    }
+    msg .= "`nCHANGE ANY OF IT - right-click the tray icon > Settings:`n"
     msg .= "   Hold `; for Ctrl, hold `` for Alt  -  tick or untick`n"
     msg .= "   Caps Lock: tap = ``, hold = Alt  -  untick for the normal Caps Lock`n"
     msg .= "   Middle mouse button  -  like `; (Ctrl), like Caps Lock (Alt), or Off`n"
@@ -644,97 +673,134 @@ SetupTrayMenu() {
     UpdateTrayTooltip()
 }
 
+; The tray menu's sub-menus (v2.1.10: the menu had grown to 36 lines).
+; Rebuilt with the menu; TrayCheck finds an item in any of them.
+; (Declared without a value: this line runs after start-up has built the
+; menu, and a value here would wipe the list.)
+global traySubMenus
+
+; Ticks or unticks a tray item, wherever it is (main menu or a sub-menu)
+TrayCheck(item, on) {
+    global traySubMenus
+    subs := IsSet(traySubMenus) && IsObject(traySubMenus) ? traySubMenus : []
+    for , m in [A_TrayMenu, subs*] {
+        try {
+            if (on)
+                m.Check(item)
+            else
+                m.Uncheck(item)
+        }
+    }
+}
+
+; Settings > ... - the same in Starter and Full (Full adds two privacy items)
+BuildSettingsMenu() {
+    global traySubMenus, holdKeysMenu, capsKeyMenu, appMode
+    global privateTypingMenu, hidePreviewsMenu, allowCaptureMenu
+    sm := Menu()
+    sm.Add("Run on Windows Startup",       (*) => ToggleStartup())
+    sm.Add("Sound Feedback",               (*) => ToggleSounds())
+    sm.Add()
+    sm.Add(holdKeysMenu,                   ToggleHoldKeys)
+    sm.Add(capsKeyMenu,                    ToggleCapsKey)
+    sm.Add("Space bar  (Ctrl+Alt+Space)",  BuildSpaceMenu())
+    sm.Add("Middle mouse button",          BuildMouseMenu())
+    sm.Add("Hold Keys Timing...",          SetHoldKeysTime)
+    sm.Add()
+    sm.Add("Trigger Keys Setup...",        (*) => ShowTriggerSetup())
+    sm.Add("Shortcut Triggers",            BuildAutoTriggerMenu())
+    pm := Menu()
+    pm.Add(privateTypingMenu,              TogglePrivateTyping)
+    if (appMode = "full") {
+        pm.Add(hidePreviewsMenu,           ToggleHidePreviews)
+        pm.Add(allowCaptureMenu,           ToggleAllowCapture)
+    }
+    sm.Add()
+    sm.Add("Privacy",                      pm)
+    traySubMenus.Push(sm, pm)
+    return sm
+}
+
+; Puts the ticks on every item that has one (after a rebuild)
+MarkTrayChecks() {
+    global config, holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu
+    global privateTyping, privateTypingMenu, hidePreviews, hidePreviewsMenu
+    global allowCapture, allowCaptureMenu
+    TrayCheck("Run on Windows Startup", FileExist(GetStartupLinkPath()) != "")
+    TrayCheck("Sound Feedback",         config["Feedback"]["PlaySounds"])
+    TrayCheck(holdKeysMenu,             holdKeysOn)
+    TrayCheck(capsKeyMenu,              capsKeyOn)
+    TrayCheck(privateTypingMenu,        privateTyping)
+    TrayCheck(hidePreviewsMenu,         hidePreviews)
+    TrayCheck(allowCaptureMenu,         allowCapture)
+}
+
 SetupStarterTrayMenu() {
-    global config, holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu, privateTyping, privateTypingMenu
+    global traySubMenus
+    traySubMenus := []
     A_TrayMenu.Add("MultiShortcuts (Starter)", (*) => 0)
     A_TrayMenu.Disable("MultiShortcuts (Starter)")
     A_TrayMenu.Add()
-    A_TrayMenu.Add("Quick Start",              (*) => ShowQuickStart())
     A_TrayMenu.Add("Show Built-in Shortcuts",  (*) => ShowHelp())
-    A_TrayMenu.Add("Trigger Keys Setup...",      (*) => ShowTriggerSetup())
-    A_TrayMenu.Add("Shortcut Triggers",          BuildAutoTriggerMenu())
-    A_TrayMenu.Add(holdKeysMenu,                 ToggleHoldKeys)
-    A_TrayMenu.Add(capsKeyMenu,                  ToggleCapsKey)
-    A_TrayMenu.Add("Space bar  (Ctrl+Alt+Space)", BuildSpaceMenu())
-    A_TrayMenu.Add("Middle mouse button", BuildMouseMenu())
-    A_TrayMenu.Add("Hold Keys Timing...",        SetHoldKeysTime)
-    if (holdKeysOn)
-        A_TrayMenu.Check(holdKeysMenu)
-    if (capsKeyOn)
-        A_TrayMenu.Check(capsKeyMenu)
-    A_TrayMenu.Add()
     A_TrayMenu.Add("* Unlock Full Features",   (*) => UnlockFullMode())
     A_TrayMenu.Add()
-    A_TrayMenu.Add("Run on Windows Startup",   (*) => ToggleStartup())
-    A_TrayMenu.Add("Sound Feedback",           (*) => ToggleSounds())
-    A_TrayMenu.Add(privateTypingMenu,          TogglePrivateTyping)
-    if (privateTyping)
-        A_TrayMenu.Check(privateTypingMenu)
-    A_TrayMenu.Add("Key Check (Ctrl+Alt+Shift+K)",          ShowKeyCheck)
-    A_TrayMenu.Add("Release Stuck Keys (Ctrl+Alt+Shift+R)", ReleaseStuckKeys)
-    A_TrayMenu.Add("Reload Script",            (*) => Reload())
+    A_TrayMenu.Add("Settings",                 BuildSettingsMenu())
+    tm := Menu()
+    tm.Add("Key Check (Ctrl+Alt+Shift+K)",          ShowKeyCheck)
+    tm.Add("Release Stuck Keys (Ctrl+Alt+Shift+R)", ReleaseStuckKeys)
+    tm.Add()
+    tm.Add("Reload Script",                    (*) => Reload())
+    A_TrayMenu.Add("Tools",                    tm)
+    hm := Menu()
+    hm.Add("Quick Start",                      (*) => ShowQuickStart())
+    hm.Add("Show Built-in Shortcuts",          (*) => ShowHelp())
+    A_TrayMenu.Add("Help",                     hm)
+    traySubMenus.Push(tm, hm)
+    A_TrayMenu.Add()
     A_TrayMenu.Add("Exit",                     (*) => ExitApp())
     A_TrayMenu.Default := "Show Built-in Shortcuts"
-    if (FileExist(GetStartupLinkPath()))
-        A_TrayMenu.Check("Run on Windows Startup")
-    if (config["Feedback"]["PlaySounds"])
-        A_TrayMenu.Check("Sound Feedback")
+    MarkTrayChecks()
 }
 
+; Eight lines; everything else is one level down
 SetupFullTrayMenu() {
-    global holdKeysOn, holdKeysMenu, capsKeyOn, capsKeyMenu, privateTyping, privateTypingMenu
-    global hidePreviews, hidePreviewsMenu, allowCapture, allowCaptureMenu
-    A_TrayMenu.Add("Quick Start",             (*) => ShowQuickStart())
-    A_TrayMenu.Add("Show Help",               (*) => ShowHelp())
-    A_TrayMenu.Add("Edit Shortcuts (Alt+E)",  (*) => ShowEditGUI("launchers"))
+    global traySubMenus
+    traySubMenus := []
+    am := Menu()
+    am.Add("Text Expansion (Alt+T, Space+F)",  (*) => AddNewExpansion())
+    am.Add("App Launcher (Alt+A)",             (*) => AddNewLauncher())
+    am.Add("Document (Alt+D)",                 (*) => AddDocumentLauncher())
+    am.Add("Web/Email (Alt+W)",                (*) => AddWebLauncher())
+    am.Add()
+    am.Add("Capture Selection (Alt+C, Space+C)", (*) => CaptureSelectedText())
+    A_TrayMenu.Add("Add a Shortcut",           am)
+    A_TrayMenu.Add("Edit Shortcuts (Alt+E)",   (*) => ShowEditGUI("launchers"))
+    A_TrayMenu.Add("Snip (Alt+Shift+S, Space+V)", (*) => Send("#+s"))
+    A_TrayMenu.Add("Pause/Resume (Alt+P)",     (*) => ToggleMacrosPause())
     A_TrayMenu.Add()
-    A_TrayMenu.Add("Add Text Expansion (Alt+T)",    (*) => AddNewExpansion())
-    A_TrayMenu.Add("Add App Launcher (Alt+A)",      (*) => AddNewLauncher())
-    A_TrayMenu.Add("Add Document (Alt+D)",          (*) => AddDocumentLauncher())
-    A_TrayMenu.Add("Add Web/Email (Alt+W)",         (*) => AddWebLauncher())
-    A_TrayMenu.Add("Capture Selection (Alt+C)",     (*) => CaptureSelectedText())
-    A_TrayMenu.Add("Snip Tool (Alt+Shift+S)",        (*) => Send("#+s"))
+    A_TrayMenu.Add("Settings",                 BuildSettingsMenu())
+    tm := Menu()
+    tm.Add("Quick Expansion Picker (Alt+Q)",   (*) => QuickTextExpansion())
+    tm.Add("Undo Last Expansion (Alt+Z)",      (*) => UndoLastExpansion())
+    tm.Add()
+    tm.Add("Usage Statistics",                 (*) => ShowUsageStats())
+    tm.Add("Backup Now (Alt+B)",               (*) => ImmediateBackup())
+    tm.Add("Export to CSV",                    (*) => ExportToCSV())
+    tm.Add("Import from CSV",                  (*) => ImportFromCSV())
+    tm.Add()
+    tm.Add("Key Check (Ctrl+Alt+Shift+K)",          ShowKeyCheck)
+    tm.Add("Release Stuck Keys (Ctrl+Alt+Shift+R)", ReleaseStuckKeys)
+    tm.Add("Reload Script (Alt+R)",            (*) => Reload())
+    A_TrayMenu.Add("Tools",                    tm)
+    hm := Menu()
+    hm.Add("Quick Start",                      (*) => ShowQuickStart())
+    hm.Add("Show Help (Alt+H)",                (*) => ShowHelp())
+    A_TrayMenu.Add("Help",                     hm)
+    traySubMenus.Push(am, tm, hm)
     A_TrayMenu.Add()
-    A_TrayMenu.Add("Quick Expansion Picker (Alt+Q)", (*) => QuickTextExpansion())
-    A_TrayMenu.Add("Undo Last Expansion (Alt+Z)",    (*) => UndoLastExpansion())
-    A_TrayMenu.Add()
-    A_TrayMenu.Add("Usage Statistics",        (*) => ShowUsageStats())
-    A_TrayMenu.Add("Backup Now (Alt+B)",      (*) => ImmediateBackup())
-    A_TrayMenu.Add("Export to CSV",           (*) => ExportToCSV())
-    A_TrayMenu.Add("Import from CSV",         (*) => ImportFromCSV())
-    A_TrayMenu.Add()
-    A_TrayMenu.Add("Run on Windows Startup",  (*) => ToggleStartup())
-    A_TrayMenu.Add("Sound Feedback",          (*) => ToggleSounds())
-    A_TrayMenu.Add(privateTypingMenu,         TogglePrivateTyping)
-    if (privateTyping)
-        A_TrayMenu.Check(privateTypingMenu)
-    A_TrayMenu.Add(hidePreviewsMenu,          ToggleHidePreviews)
-    if (hidePreviews)
-        A_TrayMenu.Check(hidePreviewsMenu)
-    A_TrayMenu.Add(allowCaptureMenu,          ToggleAllowCapture)
-    if (allowCapture)
-        A_TrayMenu.Check(allowCaptureMenu)
-    A_TrayMenu.Add("Trigger Keys Setup...",     (*) => ShowTriggerSetup())
-    A_TrayMenu.Add("Shortcut Triggers",         BuildAutoTriggerMenu())
-    A_TrayMenu.Add(holdKeysMenu,                ToggleHoldKeys)
-    A_TrayMenu.Add(capsKeyMenu,                 ToggleCapsKey)
-    A_TrayMenu.Add("Space bar  (Ctrl+Alt+Space)", BuildSpaceMenu())
-    A_TrayMenu.Add("Middle mouse button", BuildMouseMenu())
-    A_TrayMenu.Add("Hold Keys Timing...",       SetHoldKeysTime)
-    if (holdKeysOn)
-        A_TrayMenu.Check(holdKeysMenu)
-    if (capsKeyOn)
-        A_TrayMenu.Check(capsKeyMenu)
-    A_TrayMenu.Add("Pause/Resume (Alt+P)",    (*) => ToggleMacrosPause())
-    A_TrayMenu.Add("Key Check (Ctrl+Alt+Shift+K)",          ShowKeyCheck)
-    A_TrayMenu.Add("Release Stuck Keys (Ctrl+Alt+Shift+R)", ReleaseStuckKeys)
-    A_TrayMenu.Add("Reload Script",           (*) => Reload())
-    A_TrayMenu.Add("Exit",                    (*) => ExitApp())
+    A_TrayMenu.Add("Exit",                     (*) => ExitApp())
     A_TrayMenu.Default := "Edit Shortcuts (Alt+E)"
-    if (FileExist(GetStartupLinkPath()))
-        A_TrayMenu.Check("Run on Windows Startup")
-    if (config["Feedback"]["PlaySounds"])
-        A_TrayMenu.Check("Sound Feedback")
+    MarkTrayChecks()
 }
 
 UpdateTrayTooltip() {
@@ -1078,7 +1144,7 @@ PromptShortcut(prompt, title, &instant) {
 InstantCheckbox(g, pos, checked := false) {
     cb := g.Add("CheckBox", pos . " w350" . (checked ? " Checked" : ""),
                 "Fire &instantly - no space needed  ($$)")
-    g.Add("Text", "xp+18 y+2 w332 cGray", "Off: needs a space - see tray > Shortcut Triggers")
+    g.Add("Text", "xp+18 y+2 w332 cGray", "Off: needs a space - see tray > Settings > Shortcut Triggers")
     return cb
 }
 
@@ -1569,7 +1635,7 @@ CaptureSelectedText() {
     ; that, so it says so: it can be turned off in the tray menu, and with
     ; "Type expansions directly" on (clinical use) it asks every time.
     if (!allowCapture) {
-        MsgBox("Alt+C capture is turned off (tray menu).`n`n" .
+        MsgBox("Alt+C capture is turned off (tray menu > Settings > Privacy).`n`n" .
                "Use Alt+T and type or paste the text instead.", "Capture Off", "Iconi")
         return
     }
@@ -2515,11 +2581,11 @@ ToggleStartup() {
     linkPath := GetStartupLinkPath()
     if (FileExist(linkPath)) {
         FileDelete(linkPath)
-        A_TrayMenu.Uncheck("Run on Windows Startup")
+        TrayCheck("Run on Windows Startup", false)
         TrayTip("Startup Disabled", "Script will not run on login", "Iconi")
     } else {
         FileCreateShortcut(A_ScriptFullPath, linkPath, A_ScriptDir)
-        A_TrayMenu.Check("Run on Windows Startup")
+        TrayCheck("Run on Windows Startup", true)
         TrayTip("Startup Enabled", "Script will run automatically on login", "Iconi")
     }
 }
@@ -2555,10 +2621,10 @@ ToggleAllowCapture(*) {
     allowCapture := !allowCapture
     try IniWrite(allowCapture ? "1" : "0", prefsPath, "Privacy", "AllowCapture")
     if (allowCapture) {
-        A_TrayMenu.Check(allowCaptureMenu)
+        TrayCheck(allowCaptureMenu, true)
         TrayTip("Alt+C Capture On", "Alt+C copies the selection with the clipboard.", "Iconi")
     } else {
-        A_TrayMenu.Uncheck(allowCaptureMenu)
+        TrayCheck(allowCaptureMenu, false)
         TrayTip("Alt+C Capture Off", "Use Alt+T and type or paste the text instead.", "Iconi")
     }
 }
@@ -2570,11 +2636,11 @@ ToggleHidePreviews(*) {
     hidePreviews := !hidePreviews
     try IniWrite(hidePreviews ? "1" : "0", prefsPath, "Privacy", "HidePreviews")
     if (hidePreviews) {
-        A_TrayMenu.Check(hidePreviewsMenu)
+        TrayCheck(hidePreviewsMenu, true)
         TrayTip("Expansion Text Hidden",
                 "Lists now show shortcut names only.`nDouble-click a shortcut in Edit Shortcuts to see or edit its text.", "Iconi")
     } else {
-        A_TrayMenu.Uncheck(hidePreviewsMenu)
+        TrayCheck(hidePreviewsMenu, false)
         TrayTip("Expansion Text Shown", "Lists show the start of each expansion again.", "Iconi")
     }
 }
@@ -2585,12 +2651,12 @@ TogglePrivateTyping(*) {
     privateTyping := !privateTyping
     try IniWrite(privateTyping ? "1" : "0", prefsPath, "Privacy", "TypeDirectly")
     if (privateTyping) {
-        A_TrayMenu.Check(privateTypingMenu)
+        TrayCheck(privateTypingMenu, true)
         TrayTip("Private Typing On",
                 "Expansions are typed directly and never put on the clipboard.`n" .
                 "Long expansions take a little longer to appear.", "Iconi")
     } else {
-        A_TrayMenu.Uncheck(privateTypingMenu)
+        TrayCheck(privateTypingMenu, false)
         TrayTip("Private Typing Off",
                 "Expansions are pasted (faster), with clipboard-history protection.", "Iconi")
     }
@@ -2609,11 +2675,11 @@ ToggleSounds() {
     }
 
     if (newStatus) {
-        A_TrayMenu.Check("Sound Feedback")
+        TrayCheck("Sound Feedback", true)
         try SoundPlay("*48")
         TrayTip("Sounds On", "Sound feedback enabled", "Iconi")
     } else {
-        A_TrayMenu.Uncheck("Sound Feedback")
+        TrayCheck("Sound Feedback", false)
         TrayTip("Sounds Off", "Sound feedback disabled", "Iconi")
     }
 }
@@ -4719,7 +4785,7 @@ MigrateToInstantMarker() {
         ; replaced at once by the start-up notice and never seen
         msg := moved . " of your shortcuts fired instantly under the old rule, so they now "
         msg .= "end in $$ and keep working exactly as before.`n`n"
-        msg .= "Tray menu > Shortcut Triggers says which other shortcuts fire without a space.`n`n"
+        msg .= "Tray menu > Settings > Shortcut Triggers says which other shortcuts fire without a space.`n`n"
         msg .= "The built-in `; `` and = shortcuts are instant as always."
         SetTimer(() => MsgBox(msg, "Instant Shortcuts Updated", "Iconi"), -4000)
     }
@@ -4916,7 +4982,7 @@ AutoTriggerHelpText() {
     msg .= "  Auto Spacing - type . , ! ? `; or : right after an expansion and the`n"
     msg .= "      extra space goes away: `"123 Main St .`" becomes `"123 Main St. `"`n`n"
     msg .= "Swipe 2-letter is a phone-only trigger. Each of these can be turned off`n"
-    msg .= "here: tray menu > Shortcut Triggers."
+    msg .= "here: tray menu > Settings > Shortcut Triggers."
     return msg
 }
 
@@ -5182,7 +5248,7 @@ CapsLockKey(*) {
 
 ; Help rows for the hold keys (Starter and Full help share them)
 HoldKeysHelpRows() {
-    global capsKeyOn, mouseKeyOn, mouseKeyMode, spaceSymOn, spaceSymbolList, spaceMode
+    global capsKeyOn, mouseKeyOn, mouseKeyMode, spaceSymOn, spaceSymbolList, spaceMode, appMode
     rows := [
         ["hold `;",  "Ctrl + next key   (hold `; + C = copy)"],
         ["hold ``",  "Alt + next key"],
@@ -5206,11 +5272,32 @@ HoldKeysHelpRows() {
         line[i <= half ? 1 : 2] .= StrUpper(pair[1]) . " " . pair[2] . "   "
     rows.Push(["hold Space", RTrim(line[1])])
     rows.Push(["  + letter", RTrim(line[2])])
-    rows.Push(["  + R  X  Z", "Backspace / delete last word / undo expansion"])
+    rows.Push(["  + B  X  Z", "Backspace / delete last word / undo expansion"])
+    rows.Push([appMode = "full" ? "  + F  C  V" : "  + V", SpaceCmdLine(true)])
     return rows
 }
 
-; "R Backspace   X Delete word   Z Undo expansion" for the help screens
+; The Space + letter commands that work in the current mode:
+; "F Add text expansion   R Capture selection   V Screen clip"
+; style true = without the letters ("Add text expansion / ...") for a help row
+; style "eq"  = "F = add text expansion,  C = capture selection ..."
+SpaceCmdLine(style := false) {
+    global spaceCmdList, appMode
+    line := ""
+    for , c in spaceCmdList {
+        if (c[5] = "full" && appMode != "full")
+            continue
+        if (style = "eq")
+            line .= StrUpper(c[1]) . " = " . StrLower(c[3]) . ",  "
+        else if (style)
+            line .= c[3] . " / "
+        else
+            line .= StrUpper(c[1]) . " " . c[3] . " (" . c[4] . ")   "
+    }
+    return (style = "eq") ? SubStr(line, 1, -3) : style ? SubStr(line, 1, -3) : RTrim(line)
+}
+
+; "B Backspace   X Delete word   Z Undo expansion" for the help screens
 SpaceEditLine() {
     global spaceEditList
     line := ""
@@ -5221,13 +5308,17 @@ SpaceEditLine() {
 
 ; Full list for the tray tick and the Quick Start
 SpaceSymbolsText() {
-    global spaceSymbolList, spaceSymMs
+    global spaceSymbolList, spaceSymMs, spaceCmdList, appMode
     msg := "Hold Space, then tap a letter:`n`n"
     for i, pair in spaceSymbolList
         msg .= "   " . StrUpper(pair[1]) . "   " . pair[2] . (Mod(i, 4) = 0 ? "`n" : "      ")
     msg .= "`nAnd three keys:   " . StrReplace(SpaceEditLine(), "   ", "      ") . "`n"
-    msg .= "(R removes a letter, X crosses out the last word - hold to repeat.`n"
+    msg .= "(B removes a letter, X crosses out the last word - hold to repeat.`n"
     msg .= " Z undoes the last expansion, the same as Alt+Z.)`n"
+    msg .= "`nCommands (they start when you let go of Space):`n"
+    for , c in spaceCmdList
+        if (c[5] != "full" || appMode = "full")
+            msg .= "   " . StrUpper(c[1]) . "   " . c[3] . "  (same as " . c[4] . ")`n"
     msg .= "`nShift works too (hold Space + Shift + J = !).`n`n"
     msg .= "A quick tap of Space is a normal space, and typing fast is safe:`n"
     msg .= "Space only becomes symbols after it is held alone for " . spaceSymMs . " ms.`n"
@@ -5331,8 +5422,8 @@ SpaceShiftText() {
 ; Safety: the keyboard is never held back for long. Esc, Ctrl, Alt or Win
 ; end the layer at once; so do 2 s with no key and 8 s in all.
 SpaceSymbolKey(*) {
-    global spaceSymMs, spaceSymbolList, spaceEditList, spaceMode
-    static byVk := "", editVk := ""
+    global spaceSymMs, spaceSymbolList, spaceEditList, spaceCmdList, spaceMode, appMode
+    static byVk := "", editVk := "", cmdVk := ""
     static IDLE_MS := 2000, MAX_MS := 8000
     if (!IsObject(byVk)) {
         byVk := Map()
@@ -5341,6 +5432,9 @@ SpaceSymbolKey(*) {
         editVk := Map()
         for , e in spaceEditList
             editVk[GetKeyVK(e[1])] := e[2]
+        cmdVk := Map()
+        for , e in spaceCmdList
+            cmdVk[GetKeyVK(e[1])] := e
     }
     ; Ctrl+Alt+Space switches the space bar setting (normally caught by its
     ; own hotkey first; this covers it if the space bar's hotkey gets it)
@@ -5402,6 +5496,7 @@ SpaceSymbolKey(*) {
     usedLayer := false     ; a symbol was typed
     undoneHere := false    ; Space + Z already undid an expansion in this hold
     spaceSent := false
+    command   := ""        ; Space + F / R / V: run once Space is let go
     try {
         loop {
             if (!layer) {
@@ -5420,6 +5515,15 @@ SpaceSymbolKey(*) {
                         ; Hold for Shift: the key exactly as typed, with
                         ; Shift held (level 1: shortcuts see it)
                         ReplayHeldKey([ev[1], ev[2], "+"])
+                        usedLayer := true
+                    } else if (spaceMode != "shift" && cmdVk.Has(ev[1]) && (ev[3] = "" || ev[3] = "+")
+                               && (cmdVk[ev[1]][5] != "full" || appMode = "full")) {
+                        ; A command (Space + F = Alt+T ...). It runs after Space
+                        ; is let go, so its window never opens while keys are
+                        ; held back. One per hold: the letter's auto-repeat
+                        ; is swallowed here.
+                        if (command = "")
+                            command := cmdVk[ev[1]][2]
                         usedLayer := true
                     } else if (spaceMode != "shift" && editVk.Has(ev[1]) && (ev[3] = "" || ev[3] = "+")) {
                         if (editVk[ev[1]] = "undo") {
@@ -5478,6 +5582,18 @@ SpaceSymbolKey(*) {
             ih.Stop()                      ; never leave the keyboard held back
     }
     KeyWait("Space", "T3")                 ; ignore Space's auto-repeat until let go
+    if (command != "" && !st.abort)        ; Esc during the hold cancels it
+        RunCommand(SpaceCommandFn(command))
+}
+
+; What Space + F / R / V runs - the same as the Alt key for it
+SpaceCommandFn(name) {
+    switch name {
+        case "add":     return AddNewExpansion
+        case "capture": return CaptureSelectedText
+        case "snip":    return () => Send("#+s")
+    }
+    return () => 0
 }
 
 ToggleCapsKey(*) {
@@ -5486,13 +5602,13 @@ ToggleCapsKey(*) {
     try IniWrite(capsKeyOn ? "1" : "0", prefsPath, "HoldKeys", "CapsLock")
     ApplyHoldKeys()
     if (capsKeyOn) {
-        A_TrayMenu.Check(capsKeyMenu)
+        TrayCheck(capsKeyMenu, true)
         TrayTip("Caps Lock Changed",
                 "Tap Caps Lock = `` (for your `` launchers).`n" .
                 "Hold Caps Lock + a key = Alt + that key.`n" .
                 "Shift + Caps Lock = normal Caps Lock.", "Iconi")
     } else {
-        A_TrayMenu.Uncheck(capsKeyMenu)
+        TrayCheck(capsKeyMenu, false)
         TrayTip("Caps Lock Normal", "Caps Lock works as usual again.", "Iconi")
     }
 }
@@ -5563,7 +5679,7 @@ SetMouseMode(mode) {
 
 ShowHoldKeysNews() {
     MsgBox("NEW - the same shortcuts, without the reach.`n`n" . HoldKeysIntro() .
-           "Tray menu > Quick Start shows this again.",
+           "Tray menu > Help > Quick Start shows this again.",
            "What's New in MultiShortcuts Pro 2.0", "Iconi")
 }
 
@@ -5573,13 +5689,13 @@ ToggleHoldKeys(*) {
     try IniWrite(holdKeysOn ? "1" : "0", prefsPath, "HoldKeys", "Enabled")
     ApplyHoldKeys()
     if (holdKeysOn) {
-        A_TrayMenu.Check(holdKeysMenu)
+        TrayCheck(holdKeysMenu, true)
         TrayTip("Hold Keys On",
                 "Hold `; and press a key for Ctrl (hold `; + C = copy).`n" .
                 "Hold `` or Caps Lock and press a key for Alt.`n" .
                 "A quick tap still types the character.", "Iconi")
     } else {
-        A_TrayMenu.Uncheck(holdKeysMenu)
+        TrayCheck(holdKeysMenu, false)
         TrayTip("Hold Keys Off", "Semicolon and backtick type normally.", "Iconi")
     }
 }

@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.1.10
+
+### New
+- **Commands on the space bar.** With **Hold for symbols** on (tray menu → Settings → Space bar), hold Space and tap:
+  - **F** to add a text expansion, the same as Alt+T (F for Fast)
+  - **C** to capture the selected text as a shortcut, the same as Alt+C
+  - **V** for a screen clip, the same as Alt+Shift+S (V looks like open scissors)
+
+  The command starts when you let go of Space, so its window never opens while you're still holding keys. Esc during the hold cancels it. F and C need Full mode; in Starter mode they type normally. All the Alt keys still work.
+
+### Changed
+- **Space + B is Backspace now** (B for Back). It was Space + R, which is now free.
+- **Space + Y types `^` now.** Y sits right under the 6 key, and `^` is Shift+6. It was Space + C, which now captures, like Alt+C.
+- Space + X (delete the last word) and Space + Z (undo the last expansion) are unchanged.
+- **A shorter tray menu.** It had grown to 36 lines; now it has 8: **Add a Shortcut**, **Edit Shortcuts**, **Snip**, **Pause/Resume**, **Settings**, **Tools**, **Help** and **Exit**. Everything else is one level down:
+  - **Add a Shortcut:** Text Expansion, App Launcher, Document, Web/Email, Capture Selection
+  - **Settings:** Run on Windows Startup, Sound Feedback, the hold keys, Caps Lock, Space bar, Middle mouse button, Hold Keys Timing, Trigger Keys Setup, Shortcut Triggers and **Privacy** (Type expansions directly, Hide expansion text, Alt+C capture)
+  - **Tools:** Quick Expansion Picker, Undo Last Expansion, Usage Statistics, Backup Now, Export and Import CSV, Key Check, Release Stuck Keys, Reload Script
+  - **Help:** Quick Start, Show Help
+
+  Starter mode has the same Settings, Tools and Help menus.
+
+### Fixed
+- The Quick Start no longer lists the space bar's Backspace / delete word / undo keys when the space bar option is off.
+
 ## v2.1.9
 
 ### Fixed
