@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.1.9
+
+### Fixed
+- **Ending keys are kept.** A shortcut ended with Enter, Tab or punctuation now keeps that key: `addr` + Enter makes a new line, and `addr,` / `addr.` keep the comma or period. Before, the key was replaced by a space.
+- **No double space.** An expansion whose text already ends in a space (`Dear `) no longer gets a second one.
+- **Quick Expansion Picker (Alt+Q)** now fills in `{date}`, `{clip}`, `{cursor}`, `{prompt:}` and `{key:}` like a typed shortcut. Before, it typed them as written.
+- **CSV import asks once per launcher.** The review window now shows the "powerful system program" warning, and the separate yes/no questions for the same launcher are gone.
+- **Very old shortcut files** in the `shortcut|text` format whose text has spaces (`addr|123 Main St`) are now converted. Before, those lines were skipped and then failed to load. A dated backup is made first.
+- **{clip} safety warning** shows the text around the risky part, not just the start of the clipboard.
+
 ## v2.1.8
 
 ### New

@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.1.8 - 2026
+; MULTISHORTCUTS PRO v2.1.9 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -90,6 +90,19 @@
 ; v2.1.8 (2026-11-16):
 ;   - Edit Shortcuts: "Save as New" in the Edit window saves the edited
 ;     shortcut under a new name and keeps the original unchanged
+; v2.1.9 (2026-11-17):
+;   - Quick Expansion Picker (Alt+Q) expands placeholders and steps
+;     ({date}, {clip}, {cursor}, {prompt:}, {key:}) like a typed shortcut
+;   - CSV import asks once per launcher: the review window now carries
+;     the "powerful system program" warning, and the separate yes/no
+;     questions for the same launcher are skipped
+;   - a shortcut ended with Enter, Tab or punctuation keeps that key:
+;     addr + Enter makes a new line, "addr," keeps its comma (before,
+;     the key was replaced by a space)
+;   - {clip} safety warning shows the text around the risky part
+;   - old shortcut|text files whose text has spaces are now converted
+;     (before, those lines were skipped and then failed to load)
+;   - text that already ends in a space gets no second space
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -111,7 +124,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.1.8"
+global appVersion := "2.1.9"
 
 global config := Map(
     "Hotkeys", Map(
@@ -1296,7 +1309,9 @@ IsAllowedTarget(target, action := "add", depth := 0, keepScheme := "") {
                     break
                 }
             }
-            if (!known && MsgBox("This launcher uses a '" . pm[1] . ":' link, which hands the " .
+            ; An import shows every link like this in its review window
+            ; (ImportLauncherKind "protocol") - don't ask twice
+            if (!known && action != "import" && MsgBox("This launcher uses a '" . pm[1] . ":' link, which hands the " .
                        "address to another program on your PC.`n`n" . raw . "`n`n" .
                        "Only add it if you trust where it came from. Add it?",
                        "Unfamiliar Link Type", "YesNo Icon!") != "Yes")
@@ -1318,8 +1333,13 @@ IsAllowedTarget(target, action := "add", depth := 0, keepScheme := "") {
     }
 
     ; Arguments change what a program does, so show them before adding
-    ; (an import or a hand-typed target; the file picker never adds any)
+    ; (an import or a hand-typed target; the file picker never adds any).
+    ; An imported .exe/.lnk shows its arguments in the review window
+    ; instead (ImportLauncherKind) - only one question for one launcher.
+    ; Any other imported target with arguments isn't reviewed, so it's
+    ; still asked about here.
     if (args != "" && action != "launch"
+        && !(action = "import" && RegExMatch(path, "i)\.(exe|lnk)$"))
         && MsgBox("This launcher runs:`n   " . path . "`nwith these extra instructions:`n   " . args .
                   "`n`nOnly add it if you trust where it came from. Add it?",
                   "Launcher With Extra Instructions", "YesNo Icon!") != "Yes")
@@ -1378,7 +1398,7 @@ IsAllowedTarget(target, action := "add", depth := 0, keepScheme := "") {
             return true
         }
         ; A shortcut can carry hidden extra instructions - show them
-        if (lnkArgs != "" && action != "launch"
+        if (lnkArgs != "" && action != "launch" && action != "import"   ; import: review window
             && MsgBox("This shortcut runs:`n   " . lnkTarget . "`nwith these extra instructions:`n   " .
                       lnkArgs . "`n`nOnly add it if you trust where it came from. Add it?",
                       "Shortcut With Extra Instructions", "YesNo Icon!") != "Yes")
@@ -1388,43 +1408,42 @@ IsAllowedTarget(target, action := "add", depth := 0, keepScheme := "") {
         return true
     }
 
-    ; Ask before adding or running powerful system tools
-    if (config["Security"]["ConfirmDangerousTargets"]) {
-        dangerousExes := ["cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe",
-                          "cscript.exe", "mshta.exe", "regsvr32.exe", "rundll32.exe",
-                          "msiexec.exe", "wmic.exe", "forfiles.exe", "regedit.exe",
-                          "certutil.exe", "bitsadmin.exe", "schtasks.exe", "reg.exe"]
-        isDangerous := false
-        lowName := StrLower(fileName)
-        for , exe in dangerousExes {
-            if (lowName = exe) {
-                isDangerous := true
-                break
-            }
-        }
-        ; When adding, also flag anything else inside the Windows system
-        ; folders. (Not checked on every launch - it would nag about
-        ; ordinary tools like notepad.exe.)
-        if (!isDangerous && action != "launch") {
-            for , dir in ["\system32\", "\syswow64\", "\sysnative\"] {
-                if (InStr(StrLower(path), dir)) {
-                    isDangerous := true
-                    break
-                }
-            }
-        }
-        if (isDangerous) {
-            question := (verb = "launch")
-                ? "Are you sure you want to run it?"
-                : "Are you sure you want to add this launcher?"
-            if (MsgBox("Warning: This target is a powerful system program.`n`n" .
-                       raw . "`n`n" . question,
-                       "Security Warning", "YesNo Icon!") != "Yes")
-                return false
-        }
+    ; Ask before adding or running powerful system tools. An import shows
+    ; this warning in its review window instead (one question per launcher).
+    if (config["Security"]["ConfirmDangerousTargets"] && action != "import"
+        && IsPowerfulSystemTarget(path, action != "launch")) {
+        question := (verb = "launch")
+            ? "Are you sure you want to run it?"
+            : "Are you sure you want to add this launcher?"
+        if (MsgBox("Warning: This target is a powerful system program.`n`n" .
+                   raw . "`n`n" . question,
+                   "Security Warning", "YesNo Icon!") != "Yes")
+            return false
     }
 
     return true
+}
+
+;---------------------------------------------
+; True for cmd.exe, powershell.exe and the other tools that can run
+; anything. With anySystemFolder (when adding or importing), also for any
+; other program in the Windows system folders - not checked on every
+; launch, where it would nag about ordinary tools like notepad.exe.
+IsPowerfulSystemTarget(path, anySystemFolder := true) {
+    static dangerousExes := ["cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe",
+                             "cscript.exe", "mshta.exe", "regsvr32.exe", "rundll32.exe",
+                             "msiexec.exe", "wmic.exe", "forfiles.exe", "regedit.exe",
+                             "certutil.exe", "bitsadmin.exe", "schtasks.exe", "reg.exe"]
+    SplitPath(path, &fileName)
+    lowName := StrLower(fileName)
+    for , exe in dangerousExes
+        if (lowName = exe)
+            return true
+    if (anySystemFolder)
+        for , dir in ["\system32\", "\syswow64\", "\sysnative\"]
+            if (InStr(StrLower(path), dir))
+                return true
+    return false
 }
 
 ;---------------------------------------------
@@ -1728,10 +1747,11 @@ QuickTextExpansion() {
                 return
             }
             Sleep(50)
-            expansion := loadedExpansions[sc]
-            RecordExpansionHistory(sc, sc, StrLen(expansion))
-            SendText(expansion)
-            TrackUsage(sc, "expansion")
+            ; v2.1.9: the same path as typing the shortcut, so {date},
+            ; {clip}, {cursor}, {prompt:} and {key:} steps work here too,
+            ; and private typing, Undo and usage counts behave the same.
+            ; (Before, the raw text was typed, placeholders and all.)
+            DoExpand(loadedExpansions[sc], sc)
         }
     }
 
@@ -2391,7 +2411,9 @@ ImportLauncherApproved(ln, name, kind, val, path, args) {
 ; and any extra instructions. Skip is the default (Enter, Esc and closing
 ; the window all skip). Returns "import", "skip" or "stop".
 ReviewImportedLauncher(n, sc, kind, target, path, args) {
+    global config
     lines := ""
+    lnkTarget := ""
     if (kind = "exe") {
         what  := "This imported shortcut can LAUNCH A PROGRAM on your PC when you type it."
         lines .= "Program:`r`n   " . path . "`r`n"
@@ -2417,6 +2439,22 @@ ReviewImportedLauncher(n, sc, kind, target, path, args) {
         what  := "This imported shortcut hands a '" . scheme . "' link to another program on your PC, "
         what  .= "which may START that program."
         lines .= "Link:`r`n   " . target . "`r`n"
+    }
+    ; The warning IsAllowedTarget gives when adding by hand (it doesn't ask
+    ; on an import, so it's shown here - one question per launcher)
+    if (kind = "exe" || kind = "lnk") {
+        sysPath := (kind = "lnk" && lnkTarget != "") ? lnkTarget : path
+        loop 2 {                       ; a .lnk may open another .lnk (2 deep at most)
+            if (!RegExMatch(sysPath, "i)\.lnk$"))
+                break
+            nextT := ""
+            try FileGetShortcut(sysPath, &nextT)
+            if (nextT = "")
+                break
+            sysPath := nextT
+        }
+        if (config["Security"]["ConfirmDangerousTargets"] && IsPowerfulSystemTarget(sysPath))
+            lines := "WARNING: a powerful system program (it can run anything).`r`n`r`n" . lines
     }
     res := {v: "skip"}
     g := Gui("+AlwaysOnTop", "Review Imported Launcher " . n)
@@ -3656,7 +3694,7 @@ LoadLaunchers() {
     loadedLaunchers.Clear()
 
     if (!FileExist(launcherPath)) {
-        TrayTip("Launchers", "No launcher file found - creating empty one.", "Iconi")
+        TrayTip("Launchers", "No launcher file found - starting with no launchers.", "Iconi")
         return
     }
 
@@ -3748,15 +3786,23 @@ LaunchTarget(target, shortcut := "") {
 ; TEXT EXPANSION LOADING
 ;------------------------------------------------
 MakeExpansionCallback(text, sc, typed := "", cap := false) {
-    return (*) => DoExpand(text, sc, typed, cap)
+    ; A_EndChar = the key that ended the shortcut (Space, Enter, Tab, a
+    ; comma ...), or "" when it fired instantly. Read here, in the
+    ; hotstring's own thread, so it belongs to this shortcut.
+    return (*) => DoExpand(text, sc, typed, cap, A_EndChar)
 }
 
 ; typed = what was really typed (Addr, addrr ...) - Undo puts that back.
 ; cap = typed with a capital first letter (Auto Capitalization).
-DoExpand(text, sc, typed := "", cap := false) {
+DoExpand(text, sc, typed := "", cap := false, endChar := "") {
     global config
     if (typed = "")
         typed := sc
+    ; v2.1.9: the text ends with the key that ended the shortcut, so
+    ; addr + Enter still makes a new line and "addr," keeps its comma
+    ; (the hotstring's O option removes that key). Instant shortcuts and
+    ; the Quick Picker have no ending key: they get a space, as before.
+    tail := (endChar = "") ? " " : endChar
 
     ; ── Step 1: protect sequence tokens before running ResolvePlaceholders ───
     ; Scan character-by-character to correctly handle nested braces like
@@ -3838,13 +3884,17 @@ DoExpand(text, sc, typed := "", cap := false) {
         resolved  := UnshieldBraces(resolved)
         if (resolved = "")
             return
-        autoSp := (cursorPos = 0 && !RegExMatch(resolved, "\s$"))
-        SendExpandText(resolved, config, true, autoSp)
+        ; Text that already ends in a space or tab ("Dear ") gets no second
+        ; space. Enter, Tab or punctuation that ended the shortcut is still typed.
+        if (tail = " " && RegExMatch(resolved, "[ \t]$"))
+            tail := ""
+        autoSp := (tail = " " && cursorPos = 0 && !RegExMatch(resolved, "\s$"))
+        SendExpandText(resolved, config, tail, autoSp)
         if (cursorPos > 0)
-            Send("{Left " . (cursorPos + 1) . "}")   ; +1 for the trailing space
+            Send("{Left " . (cursorPos + StrLen(tail)) . "}")   ; past the ending character
         ; Undo deletes exactly what was typed. Once the caret has moved
         ; back into the text, backspacing would delete the wrong characters.
-        RecordExpansionHistory(sc, typed, cursorPos > 0 ? -1 : StrLen(resolved) + 1)
+        RecordExpansionHistory(sc, typed, cursorPos > 0 ? -1 : StrLen(resolved) + StrLen(tail))
         if (autoSp)
             AutoSpacingLinkHistory()
         return
@@ -3958,11 +4008,13 @@ DoExpand(text, sc, typed := "", cap := false) {
     cursorPos := 0
     if (textAccum != "") {
         cursorPos := TakeCursorMarker(&textAccum)
+        if (tail = " " && RegExMatch(textAccum, "[ \t]$"))
+            tail := ""                     ; no second space (see the simple path)
         if (textAccum != "")
-            SendExpandText(UnshieldBraces(textAccum), config, true)
+            SendExpandText(UnshieldBraces(textAccum), config, tail)
     }
     if (cursorPos > 0)
-        Send("{Left " . (cursorPos + 1) . "}")
+        Send("{Left " . (cursorPos + StrLen(tail)) . "}")
 
     ; Sequences send keystrokes that can't be reversed by backspacing
     RecordExpansionHistory(sc, typed, -1)
@@ -4060,9 +4112,11 @@ SetClipboardPrivate(txt) {
 ; Types a chunk of text by pasting it, then restores the user's clipboard
 ; autoSpace = start Auto Spacing the moment the trailing space is typed
 ; (not after the clipboard is put back - a quick "." would be missed)
+; addSpace = true (a space after the text), false (nothing), or the exact
+; character to type after it (the key that ended the shortcut)
 SendExpandText(txt, cfg, addSpace := true, autoSpace := false) {
     global privateTyping
-    tail := addSpace ? " " : ""
+    tail := (Type(addSpace) = "String") ? addSpace : (addSpace ? " " : "")
     ; Private typing mode (tray menu): the clipboard is never touched, so no
     ; clipboard history or clipboard manager - Microsoft's or anyone else's -
     ; can ever see the text. Slower for long text.
@@ -4081,8 +4135,7 @@ SendExpandText(txt, cfg, addSpace := true, autoSpace := false) {
     if (r = 1 && ClipWait(1)) {
         Send("^v")
         Sleep(150)          ; let the target app process the paste
-        if (addSpace)
-            Send(" ")       ; space as a separate keystroke - not trimmed by the app
+        SendTail(tail)      ; as a separate keystroke - not trimmed by the app
         if (autoSpace)
             StartAutoSpacing()
         Sleep(cfg["Performance"]["ClipRestoreDelay"])   ; slow apps (RDP, Electron) may still be pasting
@@ -4097,6 +4150,21 @@ SendExpandText(txt, cfg, addSpace := true, autoSpace := false) {
         StartAutoSpacing()
     if (r != 0 && DllCall("GetClipboardSequenceNumber", "UInt") = mySeq)
         A_Clipboard := savedClip       ; only if we changed it and nobody else has since
+}
+
+; The key after a pasted expansion. Space, Enter and Tab are sent as real
+; key presses, as before v2.1.9: some apps (browsers, Electron apps such
+; as Slack or Claude) drop a "typed" space that arrives right after a paste.
+; Punctuation (, . ! ?) is typed as text, so the keyboard layout can't
+; change it.
+SendTail(tail) {
+    switch tail {
+        case "":    return
+        case " ":   Send("{Space}")
+        case "`n":  Send("{Enter}")
+        case "`t":  Send("{Tab}")
+        default:    SendText(tail)
+    }
 }
 
 ; Types text key by key ({Text} mode, so ! ^ + { } are typed literally)
@@ -4161,7 +4229,7 @@ SanitizedClip(fmt) {
     ; user almost never wants these pasted from {clip}.
     dangerous := ["cmd.exe", "powershell", "rundll32", "mshta",
                   "javascript:", "vbscript:", "data:text/html",
-                  "ms-msdt:", "file:///", "about:", "wscript", "cscript"]
+                  "ms-msdt:", "file://", "about:", "wscript", "cscript"]
     hit := ""
     low := StrLower(out)
     for , pat in dangerous {
@@ -4174,8 +4242,12 @@ SanitizedClip(fmt) {
         return out
 
     ; Suspicious content found - ask the user before proceeding
-    preview := SubStr(out, 1, 80)
-    if (StrLen(out) > 80)
+    ; Show the text around the match, not just the start: in a long
+    ; clipboard the risky part may be far from the first line
+    idx     := InStr(low, hit)
+    from    := Max(1, idx - 30)
+    preview := (from > 1 ? "..." : "") . SubStr(out, from, 80)
+    if (from + 80 <= StrLen(out))
         preview .= "..."
     msg := "Your clipboard contains a pattern that looks like a command:`n`n"
     msg .= "  Detected: " . hit . "`n"
@@ -4356,9 +4428,16 @@ FixPipeSeparators(content) {
         trimmed := Trim(line)
         if (trimmed = "" || SubStr(trimmed, 1, 1) = ";")
             continue
-        ; Only replace first | with space (old separator format)
-        if (InStr(trimmed, "|") && !InStr(trimmed, " ")) {
-            lines[i] := StrReplace(trimmed, "|", " ", , , 1)
+        ; Old format: the first | comes before any space (shortcut|text).
+        ; A shortcut name can never contain | or a space, so this can't be
+        ; a new-format line - whose | would be inside the text, after the
+        ; first space. (v2.1.9: before, any line with a space was skipped,
+        ; so "addr|123 Main St" was never moved and then failed to load.)
+        ; Only leading space is trimmed: trailing spaces belong to the text.
+        pipePos  := InStr(trimmed, "|")
+        spacePos := InStr(trimmed, " ")
+        if (pipePos > 1 && (!spacePos || pipePos < spacePos)) {
+            lines[i] := StrReplace(LTrim(line, " `t"), "|", " ", , , 1)
             changed  := true
         }
     }
