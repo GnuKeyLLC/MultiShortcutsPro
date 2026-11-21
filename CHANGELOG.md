@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.2.1
+
+### Changed
+- **A tidier Add Text Expansion window.** It's wider, and every button label fits on one line (the date buttons were cut off before).
+  - The date and time buttons show today's date and time as examples (for instance **2026-11-20** or **7:34 PM**). They still fill in the date and time when the shortcut is used.
+  - **Add Picture...** sits with the other insert buttons.
+  - New buttons: **Fill-in spot** (after the text is typed, your cursor waits there so you can fill in a name or detail), **Ask a question** and **Clipboard text**.
+  - Rest the mouse on any of these buttons to see what it does.
+  - The long list of codes moved behind **More...**, where nothing is cut off. It now includes pictures.
+
 ## v2.2.0
 
 ### New
