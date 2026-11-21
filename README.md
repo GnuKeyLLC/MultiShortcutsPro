@@ -24,6 +24,10 @@ Turn on **Settings > Space bar > Hold for symbols** and hold Space, then tap a l
 
 A quick tap of Space is still a normal space.
 
+### Picture shortcuts
+
+Snip part of the screen once, then type a short shortcut to paste it: a logo, a product photo, a flyer, a QR code. Tray menu → **Add a Shortcut** → **Picture (snip or file)**. You can add text before or after the picture. MultiShortcuts shows the picture before saving it and offers **Shrink** when it's large for a text message. A shortcut with a picture never presses Enter for you, so nothing is sent before you check it.
+
 ---
 
 ## Requirements
@@ -56,6 +60,7 @@ MultiShortcuts Pro includes tools for:
 - Document launchers
 - Date shortcuts
 - Capturing selected text as a shortcut
+- Picture shortcuts (snip once, paste anywhere)
 - Editing and managing shortcuts
 - Expansion history and undo
 - Usage statistics
@@ -83,7 +88,7 @@ Hold keys and the Caps Lock launcher key are on from the start (see above). To c
 - **No built-in networking or telemetry.** MultiShortcuts Pro itself has no networking code: no internet connection, telemetry, downloads or automatic updates. To update, you download a new version yourself. Launchers you set up can still open websites, or files and folders on network locations, through Windows and your default apps.
 - **Launchers open what you choose.** A launcher shortcut opens the website, program, document or folder you (or a file you imported) set up for it. Websites open in your normal browser. The built-in launchers open well-known sites such as claude.ai and Gmail, plus Calculator and the Snipping Tool.
 - **It watches the keyboard.** Like every AutoHotkey shortcut tool, it uses global hotkeys and AutoHotkey's keyboard hook to notice when you type a shortcut. What you type isn't saved: the undo history and usage statistics keep only shortcut names, counts and times.
-- **Your data stays on your PC.** Shortcuts, expansions and settings are stored in readable text files next to `MultiShortcutsPro.ahk` (`launchers.ahk`, `text_expansion.ahk`, `prefs.ini` and a `backups` folder). There is no account and no cloud service. If you put the folder in OneDrive, Dropbox or Google Drive, that service syncs it.
+- **Your data stays on your PC.** Shortcuts, expansions and settings are stored in readable text files next to `MultiShortcutsPro.ahk` (`launchers.ahk`, `text_expansion.ahk`, `prefs.ini`, a `backups` folder and, for picture shortcuts, an `images` folder). There is no account and no cloud service. If you put the folder in OneDrive, Dropbox or Google Drive, that service syncs it.
 - **Don't store secrets in it.** Because the files are readable, don't put passwords, 2FA codes, banking logins or other secrets in your shortcuts or expansions.
 - **Startup is your choice.** "Run on Windows Startup" in the tray menu (under **Settings**) adds a shortcut to your Startup folder; untick it to remove it.
 

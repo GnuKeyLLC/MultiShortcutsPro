@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.1.10 - 2026
+; MULTISHORTCUTS PRO v2.2.0 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -113,6 +113,15 @@
 ;   - tray menu shortened to 8 lines: Add a Shortcut, Edit Shortcuts,
 ;     Snip, Pause/Resume, Settings, Tools, Help, Exit (Starter: Show
 ;     Built-in Shortcuts, Unlock, Settings, Tools, Help, Exit)
+; v2.2.0 (2026-11-20):
+;   - picture shortcuts: {image:name.png} pastes a saved picture (a snip
+;     or a picture file) - alone or with text. Tray > Add a Shortcut >
+;     Picture, or "Add Picture..." in the text and Edit windows. Pictures
+;     live in the images folder; {image:} can't read anything outside it.
+;   - pictures are shown before they're saved, with a warning and Shrink
+;     when one is large for text messages (limits in prefs.ini [Images])
+;   - "Replace Picture" in the Edit window (same name, new picture)
+;   - a shortcut with a picture never re-sends the Enter that ended it
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -141,7 +150,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.1.10"
+global appVersion := "2.2.0"
 
 global config := Map(
     "Hotkeys", Map(
@@ -400,6 +409,7 @@ SafeInitialize() {
         LoadHoldKeysPrefs()
         LoadSecurityPrefs()
         LoadAutoTriggerPrefs()
+        LoadImagePrefs()
 
         ; Always set up the data files - seeding the built-in ; ` = families
         ; happens here. Starter mode users get them too.
@@ -571,6 +581,7 @@ ShowFullQuickStart(*) {
     msg .= "   " . HotkeyLabel(hk["AddLauncher"])         . "   Add an app`n"
     msg .= "   " . HotkeyLabel(hk["AddDocumentLauncher"]) . "   Add a document or folder`n"
     msg .= "   " . HotkeyLabel(hk["CaptureExpansion"])    . "   Turn selected text into a shortcut`n"
+    msg .= "   Tray > Add a Shortcut > Picture   Snip once, paste it with a shortcut`n"
     msg .= "   " . HotkeyLabel(hk["ShowEditGUI"])         . "   See and edit every shortcut`n`n"
     if (capsKeyOn)
         msg .= "Tip: hold Caps Lock + T is the same as Alt+T - no reach.`n`n"
@@ -768,6 +779,7 @@ SetupFullTrayMenu() {
     traySubMenus := []
     am := Menu()
     am.Add("Text Expansion (Alt+T, Space+F)",  (*) => AddNewExpansion())
+    am.Add("Picture (snip or file)...",        (*) => AddPictureShortcut())
     am.Add("App Launcher (Alt+A)",             (*) => AddNewLauncher())
     am.Add("Document (Alt+D)",                 (*) => AddDocumentLauncher())
     am.Add("Web/Email (Alt+W)",                (*) => AddWebLauncher())
@@ -1552,21 +1564,28 @@ AddWebLauncher() {
               "Web Launcher Added", "'" . shortcut . "' saved", instant)
 }
 
-AddNewExpansion() {
+; v2.2.0: AddPictureShortcut opens this window with the name already
+; chosen and the picture in the text (prefill). created = pictures made
+; for this window; any it doesn't end up using are deleted again.
+AddNewExpansion(shortcut := "", instant := false, prefill := "", created := "") {
     global textExpansionPath, loadedExpansions
-    shortcut := PromptShortcut(
-        "Enter abbreviation to expand:`n`nExample: 'addr' for your address",
-        "Add Text Expansion", &instant)
-    if (shortcut = "")
-        return
-    if (!CheckGlobalConflict(shortcut))
-        return
+    if (!IsObject(created))
+        created := []
+    if (shortcut = "") {
+        shortcut := PromptShortcut(
+            "Enter abbreviation to expand:`n`nExample: 'addr' for your address",
+            "Add Text Expansion", &instant)
+        if (shortcut = "")
+            return
+        if (!CheckGlobalConflict(shortcut))
+            return
+    }
 
     gExp := Gui("+ToolWindow +AlwaysOnTop", "Add Text Expansion - " . shortcut)
     gExp.SetFont("s10", "Segoe UI")
     gExp.Add("Text", "x10 y10 w460 cGray",
         "Enter expansion text. Multi-line paste supported.")
-    editVal := gExp.Add("Edit", "x10 y32 w460 h140 +Multi +WantReturn", "")
+    editVal := gExp.Add("Edit", "x10 y32 w460 h140 +Multi +WantReturn", prefill)
     gExp.Add("Text", "x10 y180 w460 h100 cGray",
         "Placeholders:  {clip} {clip:100} {clip:trim} {clip:lower} {clip:upper}" .
         "`n  {date} {date:locale} {date:dd/MM/yyyy}   {time} {time:h:mm tt}" .
@@ -1591,13 +1610,24 @@ AddNewExpansion() {
         .OnEvent("Click", (*) => MsgBox(UnshieldBraces(ResolvePlaceholders(editVal.Value)),
                                         "Preview", "Iconi"))
     gExp.Add("Button", "x246 y338 w110 h28", "Cancel")
-        .OnEvent("Click", (*) => gExp.Destroy())
+        .OnEvent("Click", CloseUnsaved)
+    gExp.Add("Button", "x364 y338 w106 h28", "Add P&icture...")
+        .OnEvent("Click", (*) => InsertPicture(gExp, editVal, shortcut, created))
+    gExp.OnEvent("Close", CloseUnsaved)
     ; About storage on disk only - expanding itself keeps its privacy protections
     gExp.Add("Text", "x10 y374 w460 cGray",
         "Note: shortcuts are saved on this PC as readable text. Don't store passwords, " .
         "2FA codes, banking logins or other secrets in them.")
     gExp.Show("w480 h416")
     editVal.Focus()
+    if (prefill != "")
+        SendMessage(0xB1, StrLen(prefill), StrLen(prefill), editVal)   ; caret after the picture
+
+    ; Cancel / close: pictures made here and not used anywhere are removed
+    CloseUnsaved(*) {
+        gExp.Destroy()
+        DeleteUnusedPictures(created)
+    }
 
     DoSave(*) {
         expansion := editVal.Value
@@ -1614,6 +1644,7 @@ AddNewExpansion() {
                         "Expansion Added", "'" . shortcut . "' saved", instant)
         if (ok) {
             gExp.Destroy()
+            DeleteUnusedPictures(created)     ; e.g. a picture added, then deleted from the text
             return
         }
         saveBtn.Enabled := true
@@ -3215,17 +3246,34 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
     editVal := gInline.Add("Edit", "x120 y42 w320 h70 +Multi +WantReturn", oldTarget)
     instSet := InstantSetFor(dataType = "launchers" ? launcherPath : textExpansionPath)
     instCb  := InstantCheckbox(gInline, "x120 y120", instSet.Has(oldShortcut))
-    gInline.Add("Button", "x120 y168 w100 h28", "&Save")
+    ; v2.2.0: pictures (text expansions only). created = pictures made in
+    ; this window; any not used when it closes are deleted again.
+    created := []
+    by := 168
+    if (dataType != "launchers") {
+        gInline.Add("Button", "x120 y168 w156 h28", "Add P&icture...")
+            .OnEvent("Click", (*) => InsertPicture(gInline, editVal, Trim(editSC.Value), created))
+        gInline.Add("Button", "x284 y168 w156 h28", "&Replace Picture...")
+            .OnEvent("Click", (*) => ReplacePictureIn(gInline, editVal, Trim(editSC.Value)))
+        by := 204
+    }
+    gInline.Add("Button", "x120 y" . by . " w100 h28", "&Save")
         .OnEvent("Click", (*) => SaveInlineEdit(false))
     ; Save as New: the edited copy is added under a new name and the
     ; original shortcut is left exactly as it was
-    gInline.Add("Button", "x226 y168 w110 h28", "Save as &New")
+    gInline.Add("Button", "x226 y" . by . " w110 h28", "Save as &New")
         .OnEvent("Click", (*) => SaveInlineEdit(true))
-    gInline.Add("Button", "x342 y168 w98 h28", "Cancel")
-        .OnEvent("Click", (*) => gInline.Destroy())
-    gInline.OnEvent("Escape", (*) => gInline.Destroy())
-    gInline.Show("w490 h208")
+    gInline.Add("Button", "x342 y" . by . " w98 h28", "Cancel")
+        .OnEvent("Click", CloseInline)
+    gInline.OnEvent("Escape", CloseInline)
+    gInline.OnEvent("Close",  CloseInline)
+    gInline.Show("w490 h" . (by + 40))
     editSC.Focus()
+
+    CloseInline(*) {
+        gInline.Destroy()
+        DeleteUnusedPictures(created)
+    }
 
     SaveInlineEdit(asNew) {
         gInline.Opt("+OwnDialogs")
@@ -3284,6 +3332,7 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
         if (!ok)
             return               ; the file wasn't saved - keep the window open
         gInline.Destroy()
+        DeleteUnusedPictures(created)
         if (asNew)
             SavedNotice("Saved as New", newShortcut . " added (" . oldShortcut . " kept)")
         else
@@ -3711,7 +3760,8 @@ ShowFullHelp() {
     }
     gHelp.Add("Text", "x10 y" . y . " w480 h1 Background808080")
     y += 8
-    extras := ["Usage Statistics", "Export/Import CSV",
+    extras := ["Pictures: tray > Add a Shortcut > Picture, or Add Picture in the text window",
+               "Usage Statistics", "Export/Import CSV",
                "Run on Windows Startup", "Backups auto-saved to .\backups\",
                "Shortcuts are saved as readable text - not for passwords or 2FA codes"]
     for item in extras {
@@ -3719,16 +3769,17 @@ ShowFullHelp() {
         y += 20
     }
     y += 8
-    tipBg := gHelp.Add("Text", "x10 y" . y . " w480 h74 BackgroundFFFDE7")
-    gHelp.Add("Text", "x18 y" . (y+5) . " w468 h86 BackgroundFFFDE7 c555500",
+    tipBg := gHelp.Add("Text", "x10 y" . y . " w480 h88 BackgroundFFFDE7")
+    gHelp.Add("Text", "x18 y" . (y+5) . " w468 h100 BackgroundFFFDE7 c555500",
               "TIP: Type your shortcut anywhere - it triggers automatically.`n" .
               "     No space needed: Fire instantly ($$), a digit at the end, or addrr.`n" .
               "     Use {date:dd/MM/yyyy} or {time:h:mm tt} for custom formats.`n" .
               "     = family: r= refresh  f= fullscreen  s= save  t= new tab`n" .
               "               1-= 1 week from today  2-= 2 weeks  1m= 1 month`n" .
               "     Sequences: {key:{Tab}} = Tab, {key:^s} = Ctrl+S`n" .
-              "               {wait:500} = pause, {focus:Notepad} = switch window")
-    y += 96
+              "               {wait:500} = pause, {focus:Notepad} = switch window`n" .
+              "     Pictures: {image:logo.png} pastes a saved picture")
+    y += 110
     gHelp.Add("Text", "x10 y" . y . " w480 h1 Background808080")
     y += 6
     gHelp.Add("Text", "x10 y" . y . " w480 h18 cAAAAAA Center",
@@ -3883,7 +3934,7 @@ DoExpand(text, sc, typed := "", cap := false, endChar := "") {
     textLen := StrLen(text)
     while (i <= textLen) {
         ch := SubStr(text, i, 1)
-        if (ch = "{" && RegExMatch(SubStr(text, i), "^\{(key|wait|focus):")) {
+        if (ch = "{" && RegExMatch(SubStr(text, i), "^\{(key|wait|focus|image):")) {
             depth  := 0
             closed := false
             j := i
@@ -3934,6 +3985,7 @@ DoExpand(text, sc, typed := "", cap := false, endChar := "") {
     ;     {key:X}         – send keystroke X (any AHK Send key notation)
     ;     {wait:N}        – sleep N milliseconds
     ;     {focus:Title}   – activate window whose title contains Title
+    ;     {image:name.png} – paste a picture from the images folder (v2.2.0)
     ;
     ;   A short pause (SequenceDelay) is inserted before every {key:} and
     ;   {focus:} so the target application has time to open dialogs or move focus.
@@ -3942,7 +3994,13 @@ DoExpand(text, sc, typed := "", cap := false, endChar := "") {
     ;   suppressed). In a sequence, the space only follows the final text.
     ; ─────────────────────────────────────────────────────────────────────────
 
-    hasSequence := (InStr(resolved, "{key:") || InStr(resolved, "{wait:") || InStr(resolved, "{focus:"))
+    hasSequence := (InStr(resolved, "{key:") || InStr(resolved, "{wait:") || InStr(resolved, "{focus:")
+                    || InStr(resolved, "{image:"))
+    ; v2.2.0: a shortcut with a picture never re-sends an Enter that ended
+    ; it - in a chat or text message, Enter would send the message before
+    ; you've checked what was attached. You press Send yourself.
+    if (tail = "`n" && InStr(resolved, "{image:"))
+        tail := ""
 
     if (!hasSequence) {
         ; ── Simple (no-sequence) path ───────────────────────────────────────
@@ -3982,7 +4040,7 @@ DoExpand(text, sc, typed := "", cap := false, endChar := "") {
         ; Check for a sequence token starting here
         if (sch = "{") {
             srest := SubStr(resolved, si)
-            if (RegExMatch(srest, "^\{(key|wait|focus):")) {
+            if (RegExMatch(srest, "^\{(key|wait|focus|image):")) {
                 ; Consume full token using brace depth. An unbalanced token
                 ; is typed as text, never run (backstop for Step 1).
                 sdepth  := 0
@@ -4018,7 +4076,7 @@ DoExpand(text, sc, typed := "", cap := false, endChar := "") {
 
                 ; Parse and execute the token
                 ; seqTok is like {key:VALUE} or {wait:500} or {focus:Title}
-                if (!RegExMatch(seqTok, "^\{(key|wait|focus):(.+)\}$", &stok)) {
+                if (!RegExMatch(seqTok, "^\{(key|wait|focus|image):(.+)\}$", &stok)) {
                     si := sj
                     continue  ; skip malformed token silently
                 }
@@ -4040,6 +4098,10 @@ DoExpand(text, sc, typed := "", cap := false, endChar := "") {
                         ms := config["Performance"]["MaxWaitMs"]
                     if (ms > 0)
                         Sleep(ms)
+                } else if (stokType = "image") {
+                    ; v2.2.0: paste a saved picture (images folder only)
+                    Sleep(config["Performance"]["SequenceDelay"])
+                    PasteImage(stokValue, sc)
                 } else if (stokType = "focus") {
                     Sleep(config["Performance"]["SequenceDelay"])
                     ; Match by program (notepad.exe) or by window title. If that
@@ -4239,6 +4301,733 @@ TypeExpandText(txt, cfg) {
         SendEvent("{Text}" . txt)
     else
         SendText(txt)
+}
+
+;------------------------------------------------
+; PICTURE SHORTCUTS (v2.2.0)
+;------------------------------------------------
+; A text expansion can paste a picture: {image:name.png}. The picture is a
+; snip (Win+Shift+S) or a picture file, saved as a PNG in the images folder
+; next to this script. Typing the shortcut puts the picture on the
+; clipboard (kept out of clipboard history and cloud sync, like text),
+; presses Ctrl+V, then puts the old clipboard back.
+;
+; Safety rules:
+;   - {image:} reads ONLY from the images folder: a plain file name made of
+;     letters, digits, - and _ ending in .png. No folders, no "..", no drive
+;     letters or \\network paths - an imported shortcut can't make this
+;     script read any other file on the PC.
+;   - only real PNG files (checked by their first bytes, not the name);
+;     size limits, so a huge picture can't freeze the paste
+;   - every picture is re-saved as a fresh PNG when it is added. That also
+;     drops hidden photo details (camera, date, GPS location).
+;   - a picture is shown before it is saved, so you see exactly what will
+;     be pasted again and again
+;   - an Enter that ended the shortcut is not re-sent (see DoExpand), so a
+;     chat message is never sent before you've checked it
+global imagesDir := A_ScriptDir . "\images"
+global gdipToken := 0
+; Limits. The first three can be changed in prefs.ini [Images].
+global imageCfg := Map(
+    "WarnWidth",    1200,       ; wider than this = "large" warning (text messages)
+    "WarnKB",       1000,       ; bigger file than this = "large" warning (MMS limits are often ~1 MB)
+    "ShrinkWidth",  1000,       ; Shrink makes it this wide (and at most 1.5x as tall)
+    "KeepPixels",   16000000,   ; a saved picture can't be bigger than this (4000 x 4000)
+    "LoadPixels",   50000000,   ; a picture to add can't be bigger than this
+    "MaxFileMB",    10,         ; a saved picture's file can't be bigger than this
+    "AddFileMB",    50,         ; a picture file to add can't be bigger than this
+    "RestoreDelay", 1000,       ; ms after pasting a picture before the old clipboard returns
+    "SnipWaitSec",  60          ; how long to wait for a snip
+)
+
+LoadImagePrefs() {
+    global prefsPath, imageCfg
+    if (!FileExist(prefsPath))
+        return
+    for key, lim in Map("WarnWidth", [200, 8000], "WarnKB", [50, 10000],
+                        "ShrinkWidth", [200, 4000]) {
+        try {
+            v := IniRead(prefsPath, "Images", key, "")
+            if (IsInteger(v) && Integer(v) >= lim[1] && Integer(v) <= lim[2])
+                imageCfg[key] := Integer(v)
+        }
+    }
+}
+
+; A name {image:} may use: letters, digits, - and _ , then .png
+IsSafeImageName(name) => RegExMatch(name, "i)^[a-z0-9][a-z0-9_-]{0,59}\.png$")
+
+; The full path of a picture in the images folder, or "" with the reason
+ImagePathFor(name, &why) {
+    global imagesDir, imageCfg
+    why := ""
+    name := Trim(name)
+    if (!IsSafeImageName(name)) {
+        why := "'" . name . "' isn't a picture name this script uses (letters, digits, - and _, ending in .png)"
+        return ""
+    }
+    path := imagesDir . "\" . name
+    attr := DllCall("GetFileAttributesW", "Str", path, "UInt")
+    if (attr = 0xFFFFFFFF || (attr & 0x10)) {           ; missing, or a folder
+        why := "the picture '" . name . "' isn't in the images folder"
+        return ""
+    }
+    if (attr & 0x400) {                                 ; a link to somewhere else
+        why := "'" . name . "' is a link to another place, not a picture file"
+        return ""
+    }
+    if (FileGetSize(path) > imageCfg["MaxFileMB"] * 1024 * 1024) {
+        why := "the picture '" . name . "' is larger than " . imageCfg["MaxFileMB"] . " MB"
+        return ""
+    }
+    if (!IsPngFile(path)) {
+        why := "'" . name . "' isn't a PNG picture"
+        return ""
+    }
+    return path
+}
+
+; True if the file starts with the 8 bytes every PNG starts with
+IsPngFile(path) {
+    try {
+        f := FileOpen(path, "r")
+        buf := Buffer(8, 0)
+        n := f.RawRead(buf, 8)
+        f.Close()
+        if (n != 8)
+            return false
+        sig := [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        for i, b in sig {
+            if (NumGet(buf, i - 1, "UChar") != b)
+                return false
+        }
+        return true
+    }
+    return false
+}
+
+; True if any text expansion uses this picture
+ImageInUse(name) {
+    global loadedExpansions
+    for , val in loadedExpansions {
+        if (InStr(val, "{image:" . name . "}"))      ; InStr ignores case, like Windows names
+            return true
+    }
+    return false
+}
+
+; The picture names in a text, in order
+ImageNamesIn(text) {
+    names := []
+    pos := 1
+    while (found := RegExMatch(text, "\{image:([^{}]*)\}", &m, pos)) {
+        names.Push(Trim(m[1]))
+        pos := found + m.Len
+    }
+    return names
+}
+
+; A free file name for a new picture, made from the shortcut name
+NewImageName(suggest) {
+    global imagesDir
+    base := RegExReplace(StrLower(suggest), "[^a-z0-9_-]")
+    base := RegExReplace(base, "^[_-]+")
+    if (base = "")
+        base := "picture"
+    base := SubStr(base, 1, 40)
+    name := base . ".png"
+    n := 2
+    while (FileExist(imagesDir . "\" . name))
+        name := base . "-" . n++ . ".png"
+    return name
+}
+
+; ── GDI+ (Windows' own picture library) ─────────────────────────────────
+GdipStart() {
+    global gdipToken
+    if (gdipToken)
+        return true
+    if (!DllCall("GetModuleHandle", "Str", "gdiplus", "Ptr"))
+        DllCall("LoadLibrary", "Str", "gdiplus", "Ptr")
+    si := Buffer(A_PtrSize = 8 ? 24 : 16, 0)
+    NumPut("UInt", 1, si, 0)                     ; GdiplusVersion = 1
+    tok := 0
+    if (DllCall("gdiplus\GdiplusStartup", "UPtr*", &tok, "Ptr", si, "Ptr", 0) != 0 || !tok)
+        return false
+    gdipToken := tok
+    return true
+}
+
+GdipFree(pBmp) {
+    if (pBmp)
+        DllCall("gdiplus\GdipDisposeImage", "Ptr", pBmp)
+}
+
+BitmapSize(pBmp, &w, &h) {
+    w := 0, h := 0
+    DllCall("gdiplus\GdipGetImageWidth",  "Ptr", pBmp, "UInt*", &w)
+    DllCall("gdiplus\GdipGetImageHeight", "Ptr", pBmp, "UInt*", &h)
+}
+
+; A new in-memory picture of w x h with src drawn into it (scaled
+; smoothly). bg = a colour to put behind see-through parts (0xFFFFFFFF =
+; white), "" = keep them see-through. Returns 0 on failure.
+DrawBitmap(src, w, h, bg := "") {
+    p := 0
+    if (DllCall("gdiplus\GdipCreateBitmapFromScan0", "Int", w, "Int", h, "Int", 0,
+                "Int", 0x26200A, "Ptr", 0, "Ptr*", &p) != 0 || !p)   ; 32 bpp ARGB
+        return 0
+    g := 0
+    if (DllCall("gdiplus\GdipGetImageGraphicsContext", "Ptr", p, "Ptr*", &g) != 0 || !g) {
+        GdipFree(p)
+        return 0
+    }
+    if (bg != "")
+        DllCall("gdiplus\GdipGraphicsClear", "Ptr", g, "UInt", bg)
+    DllCall("gdiplus\GdipSetInterpolationMode", "Ptr", g, "Int", 7)  ; high-quality bicubic
+    DllCall("gdiplus\GdipSetPixelOffsetMode",   "Ptr", g, "Int", 4)  ; high quality
+    BitmapSize(src, &sw, &sh)
+    ; Tile-flip at the edges, so scaling doesn't fade the picture's border
+    attr := 0
+    DllCall("gdiplus\GdipCreateImageAttributes", "Ptr*", &attr)
+    if (attr)
+        DllCall("gdiplus\GdipSetImageAttributesWrapMode", "Ptr", attr, "Int", 3, "UInt", 0, "Int", 0)
+    r := DllCall("gdiplus\GdipDrawImageRectRectI", "Ptr", g, "Ptr", src,
+                 "Int", 0, "Int", 0, "Int", w, "Int", h,
+                 "Int", 0, "Int", 0, "Int", sw, "Int", sh,
+                 "Int", 2, "Ptr", attr, "Ptr", 0, "Ptr", 0)        ; 2 = pixels
+    if (attr)
+        DllCall("gdiplus\GdipDisposeImageAttributes", "Ptr", attr)
+    DllCall("gdiplus\GdipDeleteGraphics", "Ptr", g)
+    if (r != 0) {
+        GdipFree(p)
+        return 0
+    }
+    return p
+}
+
+; Turns a phone photo the right way up (the camera's rotation note).
+; Needed because re-saving drops that note.
+ApplyPhotoRotation(pBmp) {
+    size := 0
+    if (DllCall("gdiplus\GdipGetPropertyItemSize", "Ptr", pBmp, "UInt", 0x0112, "UInt*", &size) != 0 || size < 16)
+        return
+    item := Buffer(size, 0)
+    if (DllCall("gdiplus\GdipGetPropertyItem", "Ptr", pBmp, "UInt", 0x0112, "UInt", size, "Ptr", item) != 0)
+        return
+    pVal := NumGet(item, A_PtrSize = 8 ? 16 : 12, "Ptr")
+    if (!pVal)
+        return
+    orient := NumGet(pVal, 0, "UShort")
+    ; EXIF orientation -> GDI+ RotateFlipType
+    flip := Map(2, 4, 3, 2, 4, 6, 5, 5, 6, 1, 7, 7, 8, 3)
+    if (flip.Has(orient))
+        DllCall("gdiplus\GdipImageRotateFlip", "Ptr", pBmp, "Int", flip[orient])
+}
+
+; Loads a picture file into memory (the file isn't kept open). 0 = failed
+; or more than maxPixels.
+LoadBitmap(path, maxPixels) {
+    if (!GdipStart())
+        return 0
+    pFile := 0
+    if (DllCall("gdiplus\GdipCreateBitmapFromFile", "Str", path, "Ptr*", &pFile) != 0 || !pFile)
+        return 0
+    p := 0
+    try {
+        ApplyPhotoRotation(pFile)
+        BitmapSize(pFile, &w, &h)
+        if (w > 0 && h > 0 && w * h <= maxPixels)
+            p := DrawBitmap(pFile, w, h)
+    }
+    GdipFree(pFile)
+    return p
+}
+
+; Saves an in-memory picture as a PNG file. True if it worked.
+SaveBitmapPng(pBmp, path) {
+    static clsid := 0
+    if (!clsid) {
+        clsid := Buffer(16, 0)
+        DllCall("ole32\CLSIDFromString", "Str", "{557CF406-1A04-11D3-9A73-0000F81EF32E}", "Ptr", clsid)
+    }
+    try FileDelete(path)
+    return DllCall("gdiplus\GdipSaveImageToFile", "Ptr", pBmp, "Str", path, "Ptr", clsid, "Ptr", 0) = 0
+           && FileExist(path) != ""
+}
+
+; The picture on the clipboard (a snip) as an in-memory picture; 0 = none
+ClipboardBitmap() {
+    global imageCfg
+    if (!GdipStart())
+        return 0
+    if (!DllCall("IsClipboardFormatAvailable", "UInt", 2) && !DllCall("IsClipboardFormatAvailable", "UInt", 8))
+        return 0
+    opened := false
+    loop 10 {
+        if (DllCall("OpenClipboard", "Ptr", A_ScriptHwnd)) {
+            opened := true
+            break
+        }
+        Sleep(30)
+    }
+    if (!opened)
+        return 0
+    p := 0
+    try {
+        ; CF_BITMAP - Windows also makes it from a snip's DIB
+        hBmp := DllCall("GetClipboardData", "UInt", 2, "Ptr")
+        if (hBmp) {
+            pTmp := 0
+            if (DllCall("gdiplus\GdipCreateBitmapFromHBITMAP", "Ptr", hBmp, "Ptr", 0, "Ptr*", &pTmp) = 0 && pTmp) {
+                BitmapSize(pTmp, &w, &h)
+                if (w > 0 && h > 0 && w * h <= imageCfg["LoadPixels"])
+                    p := DrawBitmap(pTmp, w, h)   ; our own copy, made while the clipboard is open
+                GdipFree(pTmp)
+            }
+        }
+    } finally {
+        DllCall("CloseClipboard")
+    }
+    return p
+}
+
+; Puts one block of bytes on the (open) clipboard in format fmt. Throws on
+; failure; memory not yet owned by Windows is freed.
+ClipPutBytes(fmt, src, size) {
+    h := DllCall("GlobalAlloc", "UInt", 0x42, "UPtr", size, "Ptr")
+    if (!h)
+        throw Error("GlobalAlloc failed")
+    try {
+        p := DllCall("GlobalLock", "Ptr", h, "Ptr")
+        if (!p)
+            throw Error("GlobalLock failed")
+        if (src)
+            DllCall("RtlMoveMemory", "Ptr", p, "Ptr", src, "UPtr", size)
+        DllCall("GlobalUnlock", "Ptr", h)
+        if (!DllCall("SetClipboardData", "UInt", fmt, "Ptr", h, "Ptr"))
+            throw Error("SetClipboardData failed")
+        h := 0                                   ; Windows owns it now
+    } finally {
+        if (h)
+            DllCall("GlobalFree", "Ptr", h)
+    }
+}
+
+; Puts a picture on the clipboard with the same three privacy markers as
+; SetClipboardPrivate (no clipboard history, no cloud sync). Two forms:
+; a DIB that every program reads, on a white background, and the PNG file
+; itself for programs that keep see-through parts (browsers, Office).
+; Returns 1 = done, 0 = clipboard busy and not touched, -1 = failed after
+; the clipboard was emptied.
+SetClipboardImagePrivate(pBmp, pngPath) {
+    BitmapSize(pBmp, &w, &h)
+    if (w < 1 || h < 1)
+        return 0
+    ; Build the DIB first, before the clipboard is opened
+    pFlat := DrawBitmap(pBmp, w, h, 0xFFFFFFFF)
+    if (!pFlat)
+        return 0
+    stride := w * 4
+    dib := Buffer(40 + stride * h, 0)
+    NumPut("UInt", 40, "Int", w, "Int", h, "UShort", 1, "UShort", 32,
+           "UInt", 0, "UInt", stride * h, dib, 0)         ; BITMAPINFOHEADER, bottom-up
+    rect := Buffer(16, 0)
+    NumPut("Int", 0, "Int", 0, "Int", w, "Int", h, rect)
+    bd := Buffer(A_PtrSize = 8 ? 32 : 24, 0)
+    ; Read the rows straight into the DIB, bottom row first (negative stride)
+    NumPut("UInt", w, "UInt", h, "Int", -stride, "Int", 0x26200A, bd, 0)
+    NumPut("Ptr", dib.Ptr + 40 + stride * (h - 1), bd, 16)
+    locked := DllCall("gdiplus\GdipBitmapLockBits", "Ptr", pFlat, "Ptr", rect,
+                      "UInt", 5, "Int", 0x26200A, "Ptr", bd) = 0  ; read | our own buffer
+    if (locked)
+        DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pFlat, "Ptr", bd)
+    GdipFree(pFlat)
+    if (!locked)
+        return 0
+    png := ""
+    try png := FileRead(pngPath, "RAW")
+
+    opened := false
+    loop 5 {
+        if (DllCall("OpenClipboard", "Ptr", A_ScriptHwnd)) {
+            opened := true
+            break
+        }
+        Sleep(20)
+    }
+    if (!opened)
+        return 0
+    wasCritical := A_IsCritical
+    Critical("On")
+    ok := false
+    try {
+        if (!DllCall("EmptyClipboard"))
+            throw Error("EmptyClipboard failed")
+        ClipPutBytes(8, dib.Ptr, dib.Size)                     ; CF_DIB
+        if (IsObject(png) && png.Size > 0) {
+            fmtPng := DllCall("RegisterClipboardFormat", "Str", "PNG", "UInt")
+            if (fmtPng)
+                ClipPutBytes(fmtPng, png.Ptr, png.Size)
+        }
+        zero := Buffer(4, 0)                                   ; DWORD 0 = "no"
+        for , fmtName in ["ExcludeClipboardContentFromMonitorProcessing",
+                          "CanIncludeInClipboardHistory",
+                          "CanUploadToCloudClipboard"] {
+            fmt := DllCall("RegisterClipboardFormat", "Str", fmtName, "UInt")
+            if (!fmt)
+                throw Error("RegisterClipboardFormat failed: " . fmtName)
+            ClipPutBytes(fmt, zero.Ptr, 4)
+        }
+        ok := true
+    } catch Any {
+        ; handled in finally
+    } finally {
+        if (!ok)
+            try DllCall("EmptyClipboard")       ; never leave an unmarked picture behind
+        DllCall("CloseClipboard")
+        Critical(wasCritical)
+    }
+    return ok ? 1 : -1
+}
+
+; Pastes the picture {image:name} - called by DoExpand. True if pasted.
+PasteImage(name, sc) {
+    global imageCfg
+    path := ImagePathFor(name, &why)
+    pBmp := path != "" ? LoadBitmap(path, imageCfg["KeepPixels"]) : 0
+    if (!pBmp) {
+        if (why = "")
+            why := "the picture '" . Trim(name) . "' couldn't be opened"
+        PlayFeedback("ErrorSound")
+        TrayTip("Picture Not Pasted", "'" . sc . "': " . why . ".", "Icon!")
+        return false
+    }
+    savedClip := ClipboardAll()
+    r := SetClipboardImagePrivate(pBmp, path)
+    GdipFree(pBmp)
+    mySeq := DllCall("GetClipboardSequenceNumber", "UInt")
+    if (r = 1) {
+        Send("^v")
+        ; Web apps read a pasted picture a moment later - wait longer than for text
+        Sleep(imageCfg["RestoreDelay"])
+        if (DllCall("GetClipboardSequenceNumber", "UInt") = mySeq)
+            A_Clipboard := savedClip
+        return true
+    }
+    if (r != 0 && DllCall("GetClipboardSequenceNumber", "UInt") = mySeq)
+        A_Clipboard := savedClip
+    PlayFeedback("ErrorSound")
+    TrayTip("Picture Not Pasted", "'" . sc . "': the clipboard was busy. Try again.", "Icon!")
+    return false
+}
+
+; ── Adding a picture ────────────────────────────────────────────────────
+; Asks where the picture comes from (snip, the clipboard, a file), shows
+; it, offers Shrink when it's large, and saves it in the images folder.
+; suggest = the shortcut name (for the file name). replaceName = put the
+; new picture in place of this file (same name). hideGui = a window to
+; hide while snipping, so it isn't in the way. Returns the file name, or
+; "" if nothing was saved.
+PickPicture(suggest, replaceName := "", hideGui := "") {
+    global imagesDir, imageCfg
+    if (!GdipStart()) {
+        MsgBox("Windows' picture library (GDI+) couldn't be started, so pictures can't be added.",
+               "Pictures", "Icon!")
+        return ""
+    }
+    src := AskPictureSource(replaceName != "")
+    if (src = "")
+        return ""
+    try {
+        if (!DirExist(imagesDir))
+            DirCreate(imagesDir)
+    } catch Error as err {
+        MsgBox("The images folder couldn't be made:`n" . imagesDir . "`n`n" . err.Message,
+               "Pictures", "Icon!")
+        return ""
+    }
+    tempPath := imagesDir . "\~preview.png"
+    pBmp := 0
+    result := ""
+    try {
+        loop {
+            if (!pBmp) {
+                if (src = "snip")
+                    pBmp := SnipToBitmap(hideGui)
+                else if (src = "clip")
+                    pBmp := ClipboardBitmap()
+                else
+                    pBmp := FileToBitmap()
+                if (!pBmp) {
+                    if (src = "clip")
+                        MsgBox("There's no picture on the clipboard any more.", "Pictures", "Iconi")
+                    return ""
+                }
+            }
+            if (!SaveBitmapPng(pBmp, tempPath)) {
+                MsgBox("The picture couldn't be saved in:`n" . imagesDir, "Pictures", "Icon!")
+                return ""
+            }
+            choice := PreviewPicture(pBmp, tempPath, suggest, src)
+            if (choice = "cancel")
+                return ""
+            if (choice = "retake") {
+                GdipFree(pBmp)
+                pBmp := 0
+                if (src = "clip")
+                    src := "snip"                 ; the clipboard has nothing new - snip instead
+                continue
+            }
+            if (choice = "shrink") {
+                pSmall := ShrinkBitmap(pBmp)
+                if (pSmall) {
+                    GdipFree(pBmp)
+                    pBmp := pSmall
+                }
+                continue                          ; show it again, smaller
+            }
+            ; Save: move the preview file into place in one step
+            name := (replaceName != "") ? replaceName : NewImageName(suggest)
+            if (!DllCall("MoveFileEx", "Str", tempPath, "Str", imagesDir . "\" . name, "UInt", 0x9)) {
+                MsgBox("The picture couldn't be saved as:`n" . imagesDir . "\" . name .
+                       "`n`n(Windows error " . A_LastError . ")", "Pictures", "Icon!")
+                return ""
+            }
+            result := name
+            return result
+        }
+    } finally {
+        GdipFree(pBmp)
+        try FileDelete(tempPath)
+    }
+}
+
+; Snip, clipboard or file? Returns "snip", "clip", "file" or "".
+AskPictureSource(replacing) {
+    res := {v: ""}
+    hasClip := DllCall("IsClipboardFormatAvailable", "UInt", 2) || DllCall("IsClipboardFormatAvailable", "UInt", 8)
+    g := Gui("+AlwaysOnTop +ToolWindow", replacing ? "Replace Picture" : "Add a Picture")
+    g.SetFont("s10", "Segoe UI")
+    g.Add("Text", "x10 y10 w330", replacing ? "Where is the new picture?" : "Where is the picture?")
+    g.Add("Button", "x10 y+10 w330 h30 Default", "&Snip part of the screen")
+        .OnEvent("Click", (*) => (res.v := "snip", g.Destroy()))
+    if (hasClip)
+        g.Add("Button", "x10 y+6 w330 h30", "Use the picture on the &clipboard")
+            .OnEvent("Click", (*) => (res.v := "clip", g.Destroy()))
+    g.Add("Button", "x10 y+6 w330 h30", "Choose a picture &file...")
+        .OnEvent("Click", (*) => (res.v := "file", g.Destroy()))
+    g.Add("Button", "x10 y+12 w330 h28", "Cancel")
+        .OnEvent("Click", (*) => g.Destroy())
+    g.OnEvent("Close",  (*) => g.Destroy())
+    g.OnEvent("Escape", (*) => g.Destroy())
+    hwnd := g.Hwnd
+    g.Show("w350")
+    WinWaitClose("ahk_id " . hwnd)
+    return res.v
+}
+
+; Opens the snipping tool and waits for the snip to reach the clipboard.
+; Esc (which also closes the snipping tool) gives up. 0 = no snip.
+SnipToBitmap(hideGui := "") {
+    global imageCfg
+    if (IsObject(hideGui))
+        try hideGui.Hide()
+    seq := DllCall("GetClipboardSequenceNumber", "UInt")
+    Send("#+s")
+    p := 0
+    gaveUp := false
+    start := A_TickCount
+    ; Watches for Esc without taking it away from the snipping tool
+    escHook := InputHook("V L0", "{Esc}")
+    escHook.Start()
+    try {
+        loop {
+            Sleep(100)
+            if (escHook.EndReason = "EndKey") {
+                gaveUp := true
+                break
+            }
+            now := DllCall("GetClipboardSequenceNumber", "UInt")
+            if (now != seq) {
+                seq := now
+                Sleep(150)                        ; let the snipping tool finish writing
+                p := ClipboardBitmap()
+                if (p)
+                    break
+            }
+            if (A_TickCount - start > imageCfg["SnipWaitSec"] * 1000)
+                break
+        }
+    } finally {
+        try escHook.Stop()
+        if (IsObject(hideGui))
+            try hideGui.Show()
+    }
+    if (!p && !gaveUp)
+        MsgBox("No snip arrived, so nothing was added.`n`nTry again, and drag around the part " .
+               "of the screen you want.", "Pictures", "Iconi")
+    return p
+}
+
+; Asks for a picture file. 0 = cancelled or not a picture.
+FileToBitmap() {
+    global imageCfg
+    path := FileSelect(1, EnvGet("USERPROFILE") . "\Pictures", "Choose a Picture",
+                       "Pictures (*.png; *.jpg; *.jpeg; *.bmp; *.gif)")
+    if (path = "")
+        return 0
+    if (FileGetSize(path) > imageCfg["AddFileMB"] * 1024 * 1024) {
+        MsgBox("That file is larger than " . imageCfg["AddFileMB"] . " MB. Choose a smaller picture.",
+               "Pictures", "Icon!")
+        return 0
+    }
+    p := LoadBitmap(path, imageCfg["LoadPixels"])
+    if (!p)
+        MsgBox("That file couldn't be opened as a picture (or it is very large).",
+               "Pictures", "Icon!")
+    return p
+}
+
+; True if the picture counts as large for text messages
+ImageIsLarge(w, h, bytes) {
+    global imageCfg
+    return w > imageCfg["WarnWidth"] || h > imageCfg["WarnWidth"] * 1.5
+        || bytes > imageCfg["WarnKB"] * 1024
+}
+
+; A smaller copy: at most ShrinkWidth wide and 1.5x that tall. A picture
+; that is already narrow enough but has a large file gets 3/4 size.
+ShrinkBitmap(pBmp) {
+    global imageCfg
+    BitmapSize(pBmp, &w, &h)
+    sw := imageCfg["ShrinkWidth"]
+    f := Min(sw / w, sw * 1.5 / h, 1)
+    if (f >= 1)
+        f := 0.75
+    nw := Max(1, Round(w * f))
+    nh := Max(1, Round(h * f))
+    return DrawBitmap(pBmp, nw, nh)
+}
+
+; Shows the picture before it is saved. Returns "save", "shrink",
+; "retake" or "cancel".
+PreviewPicture(pBmp, path, sc, src) {
+    global imageCfg
+    BitmapSize(pBmp, &w, &h)
+    bytes := FileGetSize(path)
+    large := ImageIsLarge(w, h, bytes)
+    tooBig := (w * h > imageCfg["KeepPixels"]) || (bytes > imageCfg["MaxFileMB"] * 1024 * 1024)
+    ; Fit the picture into 560 x 380 on screen, never larger than it is
+    f  := Min(560 / w, 380 / h, 1)
+    pw := Max(1, Round(w * f))
+    ph := Max(1, Round(h * f))
+    res := {v: "cancel"}
+    g := Gui("+AlwaysOnTop", "Picture for '" . sc . "'")
+    g.SetFont("s10", "Segoe UI")
+    g.BackColor := "FFFFFF"
+    g.Add("Picture", "x" . (10 + (560 - pw) // 2) . " y10 w" . pw . " h" . ph . " Border", path)
+    kb := Round(bytes / 1024)
+    y := ph + 20
+    g.Add("Text", "x10 y" . y . " w560", w . " x " . h . " pixels, " .
+          (kb >= 1024 ? Round(kb / 1024, 1) . " MB" : kb . " KB"))
+    y += 24
+    if (tooBig) {
+        t := g.Add("Text", "x10 y" . y . " w560 h40 cB00020",
+                   "This picture is too large to keep. Shrink it, or retake a smaller part of the screen.")
+        y += 44
+    } else if (large) {
+        t := g.Add("Text", "x10 y" . y . " w560 h40 cB00020",
+                   "This picture is large. In a text message it may arrive blurry or fail to send. " .
+                   "Gmail, Outlook and Word handle it fine.")
+        y += 44
+        g.Add("Text", "x10 y" . y . " w560 h40 cGray",
+              "Shrink makes it " . imageCfg["ShrinkWidth"] . " pixels wide. Or zoom out in the app first " .
+              "(Ctrl and minus) and retake it: small text often stays sharper that way.")
+        y += 44
+    }
+    g.Add("Text", "x10 y" . y . " w560 h40 cGray",
+          "Check what's in it: this picture is pasted every time you use the shortcut. " .
+          "Leave out names, numbers and messages that aren't meant for everyone.")
+    y += 48
+    bx := 10
+    if (!tooBig) {
+        g.Add("Button", "x" . bx . " y" . y . " w120 h30" . (large ? "" : " Default"), "&Save")
+            .OnEvent("Click", (*) => (res.v := "save", g.Destroy()))
+        bx += 128
+    }
+    if (large || tooBig) {
+        g.Add("Button", "x" . bx . " y" . y . " w120 h30 Default", "S&hrink")
+            .OnEvent("Click", (*) => (res.v := "shrink", g.Destroy()))
+        bx += 128
+    }
+    g.Add("Button", "x" . bx . " y" . y . " w120 h30", src = "file" ? "&Other file..." : "&Retake")
+        .OnEvent("Click", (*) => (res.v := "retake", g.Destroy()))
+    bx += 128
+    g.Add("Button", "x" . bx . " y" . y . " w120 h30", "Cancel")
+        .OnEvent("Click", (*) => g.Destroy())
+    g.OnEvent("Close",  (*) => g.Destroy())
+    g.OnEvent("Escape", (*) => g.Destroy())
+    hwnd := g.Hwnd
+    g.Show("w580 h" . (y + 44))
+    WinWaitClose("ahk_id " . hwnd)
+    return res.v
+}
+
+; Tray > Add a Shortcut > Picture: name, picture, then the normal text
+; window with the picture already in it (add words before or after it)
+AddPictureShortcut() {
+    shortcut := PromptShortcut(
+        "Enter a shortcut name for the picture:`n`nExample: 'logo' or 'flyer'",
+        "Add Picture Shortcut", &instant)
+    if (shortcut = "")
+        return
+    if (!CheckGlobalConflict(shortcut))
+        return
+    name := PickPicture(shortcut)
+    if (name = "")
+        return
+    AddNewExpansion(shortcut, instant, "{image:" . name . "}", [name])
+}
+
+; Deletes pictures made in a window that was closed without using them
+DeleteUnusedPictures(names) {
+    global imagesDir
+    for , n in names {
+        if (IsSafeImageName(n) && !ImageInUse(n))
+            try FileDelete(imagesDir . "\" . n)
+    }
+}
+
+; "Add Picture..." in the text windows: picks a picture and puts its
+; {image:} at the caret. created = the list of pictures made in this window.
+InsertPicture(gWin, editCtrl, sc, created) {
+    gWin.Opt("+OwnDialogs")
+    name := PickPicture(sc != "" ? sc : "picture", "", gWin)
+    if (name = "")
+        return
+    created.Push(name)
+    InsertIntoEdit(editCtrl, "{image:" . name . "}")
+}
+
+; "Replace Picture" in the Edit window: a new picture in place of the
+; first one in the text, under the same file name (every shortcut that
+; uses it gets the new picture). Saved at once.
+ReplacePictureIn(gWin, editCtrl, sc) {
+    gWin.Opt("+OwnDialogs")
+    names := ImageNamesIn(editCtrl.Value)
+    if (names.Length = 0) {
+        MsgBox("This shortcut has no picture. Use Add Picture instead.", "Replace Picture", "Iconi")
+        return
+    }
+    old := names[1]
+    if (!IsSafeImageName(old)) {
+        MsgBox("'" . old . "' isn't a picture name this script uses, so it can't be replaced.",
+               "Replace Picture", "Icon!")
+        return
+    }
+    if (PickPicture(sc, old, gWin) != "")
+        TrayTip("Picture Replaced", "'" . old . "' now has the new picture.", "Iconi")
 }
 
 ; Text from the clipboard or a {prompt:} answer is plain text: hide its

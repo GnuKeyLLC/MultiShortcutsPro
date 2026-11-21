@@ -12,6 +12,9 @@ expansion_history.ini
 
 # Backups
 backups/
+
+# Pictures for picture shortcuts (v2.2.0)
+images/
 *.bak
 
 # Temporary files and locks from safe saving
