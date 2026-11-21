@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.2.0 - 2026
+; MULTISHORTCUTS PRO v2.2.1 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -122,6 +122,12 @@
 ;     when one is large for text messages (limits in prefs.ini [Images])
 ;   - "Replace Picture" in the Edit window (same name, new picture)
 ;   - a shortcut with a picture never re-sends the Enter that ended it
+; v2.2.1 (2026-11-20):
+;   - Add Text Expansion window laid out again: wider, button labels fit,
+;     date/time buttons show today's date and time as examples, new
+;     Fill-in spot / Ask a question / Clipboard text buttons (each
+;     explains itself when the mouse rests on it), and the full
+;     placeholder list moved behind "More..."
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -150,7 +156,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.2.0"
+global appVersion := "2.2.1"
 
 global config := Map(
     "Hotkeys", Map(
@@ -1581,44 +1587,57 @@ AddNewExpansion(shortcut := "", instant := false, prefill := "", created := "") 
             return
     }
 
+    ; v2.2.1: laid out again - wider, every button label fits on one line,
+    ; and the long placeholder list moved behind "More..." so nothing is cut off
     gExp := Gui("+ToolWindow +AlwaysOnTop", "Add Text Expansion - " . shortcut)
     gExp.SetFont("s10", "Segoe UI")
-    gExp.Add("Text", "x10 y10 w460 cGray",
-        "Enter expansion text. Multi-line paste supported.")
-    editVal := gExp.Add("Edit", "x10 y32 w460 h140 +Multi +WantReturn", prefill)
-    gExp.Add("Text", "x10 y180 w460 h100 cGray",
-        "Placeholders:  {clip} {clip:100} {clip:trim} {clip:lower} {clip:upper}" .
-        "`n  {date} {date:locale} {date:dd/MM/yyyy}   {time} {time:h:mm tt}" .
-        "`n  {day} {month} {year}   {user} = login name   {comp} = computer name" .
-        "`n  {cursor} = place caret here after expansion   {cursor:5} = move left 5" .
-        "`n  {prompt:Question?} = ask for input   {prompt:Question?|default}" .
-        "`n  -- Sequence tokens --" .
-        "`n  {key:F6} = press a key   {key:^s} = Ctrl+S   {key:{Tab}} = Tab" .
-        "`n  {wait:500} = pause 500 ms   {focus:Notepad} = activate window by title")
-    gExp.Add("Text", "x10 y286 w480 cGray", "Quick insert:")
-    gExp.Add("Button", "x10 y304 w106 h24", "Date yyyy-MM-dd")
-        .OnEvent("Click", (*) => InsertIntoEdit(editVal, "{date}"))
-    gExp.Add("Button", "x122 y304 w106 h24", "Date dd/MM/yyyy")
-        .OnEvent("Click", (*) => InsertIntoEdit(editVal, "{date:dd/MM/yyyy}"))
-    gExp.Add("Button", "x234 y304 w100 h24", "Time HH:mm")
-        .OnEvent("Click", (*) => InsertIntoEdit(editVal, "{time}"))
-    gExp.Add("Button", "x340 y304 w130 h24", "Time h:mm AM/PM")
-        .OnEvent("Click", (*) => InsertIntoEdit(editVal, "{time:h:mm tt}"))
-    saveBtn := gExp.Add("Button", "x10 y338 w110 h28", "&Save")
+    hdr := gExp.Add("Text", "x12 y12 w536", "What should '" . shortcut . "' type?")
+    hdr.SetFont("s10 Bold")
+    editVal := gExp.Add("Edit", "x12 y36 w536 h150 +Multi +WantReturn", prefill)
+    gExp.Add("Text", "x12 y196 w536 cGray",
+        "Insert at the cursor. Dates and times fill in when you use the shortcut.")
+    ; Each insert button explains itself when the mouse rests on it
+    InsertButton(pos, label, code, tip) {
+        b := gExp.Add("Button", pos, label)
+        b.OnEvent("Click", (*) => InsertIntoEdit(editVal, code))
+        AddHoverTip(b, tip)
+    }
+    picBtn := gExp.Add("Button", "x12 y218 w128 h30", "Add P&icture...")
+    picBtn.OnEvent("Click", (*) => InsertPicture(gExp, editVal, shortcut, created))
+    AddHoverTip(picBtn, "Add a picture: snip the screen, use a copied picture, or pick a photo.")
+    InsertButton("x148 y218 w100 h30", FormatTime(, "yyyy-MM-dd"), "{date}",
+        "The date the shortcut is used, written like this.")
+    InsertButton("x256 y218 w100 h30", FormatTime(, "dd/MM/yyyy"), "{date:dd/MM/yyyy}",
+        "The date the shortcut is used, written like this.")
+    InsertButton("x364 y218 w80 h30", FormatTime(, "HH:mm"), "{time}",
+        "The time the shortcut is used, written like this.")
+    InsertButton("x452 y218 w96 h30", FormatTime(, "h:mm tt"), "{time:h:mm tt}",
+        "The time the shortcut is used, written like this.")
+    InsertButton("x12 y254 w128 h30", "Fill-in spot", "{cursor}",
+        "After the text is typed, your cursor waits here so you can fill in a name or detail.`n" .
+        "Example: Dear {cursor}, ... puts the cursor right after 'Dear '.")
+    InsertButton("x148 y254 w128 h30", "Ask a question", "{prompt:Question?}",
+        "When you use the shortcut, a box asks this question and types your answer here.`n" .
+        "Change 'Question?' to your own question.")
+    InsertButton("x284 y254 w128 h30", "Clipboard text", "{clip}",
+        "Types whatever text you last copied (Ctrl+C).")
+    moreBtn := gExp.Add("Button", "x420 y254 w128 h30", "M&ore...")
+    moreBtn.OnEvent("Click", (*) => (gExp.Opt("+OwnDialogs"), MsgBox(PlaceholderHelpText(), "Placeholders", "Iconi")))
+    AddHoverTip(moreBtn, "Every code you can use in a shortcut, with what it does.")
+    gExp.Add("Text", "x12 y296 w536 h1 0x10")               ; a thin line
+    saveBtn := gExp.Add("Button", "x12 y308 w110 h30", "&Save")
     saveBtn.OnEvent("Click", DoSave)
-    gExp.Add("Button", "x128 y338 w110 h28", "&Preview")
-        .OnEvent("Click", (*) => MsgBox(UnshieldBraces(ResolvePlaceholders(editVal.Value)),
-                                        "Preview", "Iconi"))
-    gExp.Add("Button", "x246 y338 w110 h28", "Cancel")
+    gExp.Add("Button", "x130 y308 w110 h30", "&Preview")
+        .OnEvent("Click", (*) => (gExp.Opt("+OwnDialogs"), MsgBox(UnshieldBraces(ResolvePlaceholders(editVal.Value)),
+                                        "Preview", "Iconi")))
+    gExp.Add("Button", "x248 y308 w110 h30", "Cancel")
         .OnEvent("Click", CloseUnsaved)
-    gExp.Add("Button", "x364 y338 w106 h28", "Add P&icture...")
-        .OnEvent("Click", (*) => InsertPicture(gExp, editVal, shortcut, created))
     gExp.OnEvent("Close", CloseUnsaved)
     ; About storage on disk only - expanding itself keeps its privacy protections
-    gExp.Add("Text", "x10 y374 w460 cGray",
-        "Note: shortcuts are saved on this PC as readable text. Don't store passwords, " .
+    gExp.Add("Text", "x12 y348 w536 h36 cGray",
+        "Shortcuts are saved on this PC as readable text. Don't store passwords, " .
         "2FA codes, banking logins or other secrets in them.")
-    gExp.Show("w480 h416")
+    gExp.Show("w560 h392")
     editVal.Focus()
     if (prefill != "")
         SendMessage(0xB1, StrLen(prefill), StrLen(prefill), editVal)   ; caret after the picture
@@ -1650,6 +1669,82 @@ AddNewExpansion(shortcut := "", instant := false, prefill := "", created := "") 
         saveBtn.Enabled := true
         editVal.Focus()
     }
+}
+
+; Hover help for buttons: AddHoverTip(ctrl, "text") shows the text while
+; the mouse rests on that control. One WM_MOUSEMOVE handler for all
+; windows; a short timer hides the tip once the mouse leaves the control.
+global hoverTips := Map()
+global hoverTipHwnd := 0
+AddHoverTip(ctrl, text) {
+    global hoverTips
+    static hooked := false
+    hoverTips[ctrl.Hwnd] := text
+    if (!hooked) {
+        OnMessage(0x200, HoverTipMove)        ; WM_MOUSEMOVE
+        hooked := true
+    }
+    return ctrl
+}
+HoverTipMove(wParam, lParam, msg, hwnd) {
+    global hoverTips, hoverTipHwnd
+    if (hwnd = hoverTipHwnd)
+        return
+    if (!hoverTips.Has(hwnd)) {
+        if (hoverTipHwnd)                     ; moved onto another part of our window
+            HoverTipHide()
+        return
+    }
+    hoverTipHwnd := hwnd
+    ToolTip(hoverTips[hwnd], , , 19)
+    SetTimer(HoverTipCheck, 250)
+}
+HoverTipCheck() {
+    global hoverTips, hoverTipHwnd
+    over := 0
+    try MouseGetPos(, , , &over, 2)
+    if (over = hoverTipHwnd)
+        return
+    HoverTipHide()
+}
+HoverTipHide() {
+    global hoverTips, hoverTipHwnd
+    ToolTip(, , , 19)
+    hoverTipHwnd := 0
+    SetTimer(HoverTipCheck, 0)
+    ; Forget controls whose windows are gone
+    gone := []
+    for h in hoverTips {
+        if (!DllCall("IsWindow", "Ptr", h))
+            gone.Push(h)
+    }
+    for , h in gone
+        hoverTips.Delete(h)
+}
+
+; Every placeholder, for the "More..." button in the Add Text window
+PlaceholderHelpText() {
+    return "DATE AND TIME`n"
+        . "   {date}   {date:dd/MM/yyyy}   {date:locale}`n"
+        . "   {date:+7} = a week from today`n"
+        . "   {time}   {time:h:mm tt}`n"
+        . "   {day}   {month}   {year}`n`n"
+        . "CLIPBOARD AND QUESTIONS`n"
+        . "   {clip} = the copied text`n"
+        . "   {clip:trim}   {clip:lower}   {clip:upper}   {clip:100}`n"
+        . "   {prompt:Question?} = ask when used`n"
+        . "   {prompt:Question?|default answer}`n`n"
+        . "CURSOR`n"
+        . "   {cursor} = fill-in spot: the cursor waits here`n"
+        . "   {cursor:5} = 5 characters left of the end`n`n"
+        . "PICTURES`n"
+        . "   {image:logo.png} = paste a saved picture`n`n"
+        . "WHO AND WHERE`n"
+        . "   {user} = login name     {comp} = computer name`n`n"
+        . "KEYS AND STEPS`n"
+        . "   {key:F6} = press a key     {key:^s} = Ctrl+S`n"
+        . "   {key:{Tab}} = Tab     {wait:500} = pause 0.5 s`n"
+        . "   {focus:Notepad} = switch to that window"
 }
 
 ;------------------------------------------------
