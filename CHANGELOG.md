@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.2.0
+
+### New
+- **Picture shortcuts.** A text expansion can now paste a picture: snip part of the screen once, then type a short shortcut to paste it into an email, chat or text message. Good for a logo, a product photo, a flyer, or a payment or Wi-Fi QR code.
+  - **Tray menu → Add a Shortcut → Picture (snip or file).** Name the shortcut, then snip the screen, use the picture already on the clipboard, or choose a picture file. The text window opens with the picture in it, so you can add words before or after it (`Here's the one I'd look for: {image:magnesium.png}`).
+  - **Add Picture...** in the Add Text Expansion and Edit windows puts a picture where the cursor is.
+  - **Replace Picture...** in the Edit window swaps in a new picture under the same name, so an updated flyer keeps its shortcut.
+  - In the text, a picture is written `{image:name.png}`. Other placeholders such as `{date}` work next to it.
+- **You see the picture before it's saved**, with its size. If it's large for a text message (wider than 1200 pixels or bigger than about 1 MB), MultiShortcuts says so and offers **Shrink** (1000 pixels wide). Or zoom out in the app first (Ctrl and minus) and **Retake**: small text often stays sharper that way. The limits can be changed in `prefs.ini` under `[Images]` (`WarnWidth`, `WarnKB`, `ShrinkWidth`).
+- A picture pastes wherever you can paste a picture yourself: Gmail, Outlook, Word, Google Docs, Teams, Slack, Discord, Google Voice and similar. Plain text boxes such as Notepad can't take one.
+
+### Safety and privacy
+- Pictures are kept in an `images` folder next to `MultiShortcutsPro.ahk`. `{image:}` only reads from that folder: a plain name of letters, digits, `-` and `_` ending in `.png`. Folders, `..`, drive letters and network paths are refused, so a shortcut (or an imported file) can't make MultiShortcuts read any other file. Only real PNG files are used, up to 10 MB.
+- Every picture is saved as a fresh PNG when you add it. That also removes hidden photo details such as the camera, date and GPS location. Phone photos are turned the right way up first.
+- A pasted picture gets the same clipboard protection as text: it's kept out of clipboard history (Win+V) and cloud clipboard, and your old clipboard is put back afterwards. This also applies with **Type expansions directly** on, because a picture can't be typed key by key.
+- **A shortcut with a picture never sends Enter for you.** If you end it with Enter, the Enter isn't re-sent, so a chat or text message isn't sent before you've checked what's attached.
+- Pictures you add in a window and then cancel are deleted again. Deleting a shortcut leaves its picture in the `images` folder.
+
+### Notes
+- Backups and CSV export/import cover the shortcut text only. To move picture shortcuts to another PC, copy the `images` folder too.
+- Picture shortcuts don't move to the phone with the Phone ↔ PC converter.
+
 ## v2.1.10
 
 ### New
