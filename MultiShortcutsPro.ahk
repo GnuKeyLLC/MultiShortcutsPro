@@ -133,6 +133,10 @@
 ;     pasted as a file (like File Explorer's Copy), so it keeps moving in
 ;     Gmail, Google Voice, Slack, Teams and Discord. Or use it as a still
 ;     picture. Same rules: images folder only, real GIFs only, size limit.
+;   - GIF Shrink: texts often refuse GIFs over ~600 KB (prefs.ini [Images]
+;     GifTargetKB). Shrink writes a smaller animated copy (GDI+ reads the
+;     frames, Windows Imaging Component writes the GIF): up to 480 px,
+;     then smaller, then fewer frames, until it fits.
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -4438,7 +4442,8 @@ global imageCfg := Map(
     "MaxFileMB",    10,         ; a saved picture's file can't be bigger than this
     "AddFileMB",    50,         ; a picture file to add can't be bigger than this
     "RestoreDelay", 1000,       ; ms after pasting a picture before the old clipboard returns
-    "SnipWaitSec",  60          ; how long to wait for a snip
+    "SnipWaitSec",  60,         ; how long to wait for a snip
+    "GifTargetKB",  600         ; v2.2.2: GIFs over this get "too big for texts" and Shrink aims under it
 )
 
 LoadImagePrefs() {
@@ -4446,7 +4451,7 @@ LoadImagePrefs() {
     if (!FileExist(prefsPath))
         return
     for key, lim in Map("WarnWidth", [200, 8000], "WarnKB", [50, 10000],
-                        "ShrinkWidth", [200, 4000]) {
+                        "ShrinkWidth", [200, 4000], "GifTargetKB", [100, 5000]) {
         try {
             v := IniRead(prefsPath, "Images", key, "")
             if (IsInteger(v) && Integer(v) >= lim[1] && Integer(v) <= lim[2])
@@ -4930,6 +4935,181 @@ SetClipboardFilePrivate(path) {
     return ok ? 1 : -1
 }
 
+; ── Shrinking an animated GIF (v2.2.2) ───────────────────────────────────
+; Text messages often refuse GIFs over ~600 KB. ShrinkGif makes a smaller
+; copy that still moves: fewer pixels first, then fewer frames, trying
+; until the file fits. GDI+ reads the frames (it puts partial frames
+; together correctly); Windows Imaging Component (WIC, built into Windows)
+; writes the new animated GIF. Nothing is installed.
+
+WicGuid(s) {
+    g := Buffer(16, 0)
+    DllCall("ole32\CLSIDFromString", "Str", s, "Ptr", g)
+    return g
+}
+
+; A PROPVARIANT: vt = 17 (byte), 18 (UShort) or 0x1011 (byte list, from a Buffer)
+WicProp(vt, value) {
+    pv := Buffer(A_PtrSize = 8 ? 24 : 16, 0)
+    NumPut("UShort", vt, pv, 0)
+    if (vt = 17)
+        NumPut("UChar", value, pv, 8)
+    else if (vt = 18)
+        NumPut("UShort", value, pv, 8)
+    else {                                      ; VT_VECTOR | VT_UI1
+        NumPut("UInt", value.Size, pv, 8)
+        NumPut("Ptr", value.Ptr, pv, 8 + A_PtrSize)
+    }
+    return pv
+}
+
+WicSetMeta(writer, name, pv) {
+    try ComCall(7, writer, "Str", name, "Ptr", pv)      ; SetMetadataByName
+}
+
+; Writes the frames of srcGif (a GDI+ image), scaled to w x h and keeping
+; every step-th frame, as an animated GIF at dst. True if it worked.
+WriteGifFrames(pImg, frames, delays, w, h, step, dst) {
+    static factory := 0
+    if (!factory)
+        factory := ComObject("{CACAF262-9370-4615-A13B-9F5539DA4C0A}",
+                             "{EC5EC8A9-C395-4314-9C77-54D7A935FF70}")   ; IWICImagingFactory
+    gifFormat := WicGuid("{1F8A5601-7D4D-4CBD-9C82-1BC8D4EEB9A5}")
+    fmtBGR    := WicGuid("{6FDDC324-4E03-4BFE-B185-3D77768DC90E}")       ; 32bppBGR
+    fmt8      := WicGuid("{6FDDC324-4E03-4BFE-B185-3D77768DC904}")       ; 8bppIndexed
+    timeDim   := WicGuid("{6AEDBD6D-3FB5-418A-83A6-7F45229DC872}")
+    try FileDelete(dst)
+    ComCall(14, factory, "Ptr*", &pStream := 0)                          ; CreateStream
+    stream := ComValue(13, pStream)
+    ComCall(15, stream, "Str", dst, "UInt", 0x40000000)                  ; InitializeFromFilename, GENERIC_WRITE
+    ComCall(8, factory, "Ptr", gifFormat, "Ptr", 0, "Ptr*", &pEnc := 0)  ; CreateEncoder
+    enc := ComValue(13, pEnc)
+    ComCall(3, enc, "Ptr", stream, "Int", 2)                             ; Initialize, no cache
+    ; Loop forever (the NETSCAPE2.0 block every animated GIF has)
+    try {
+        ComCall(12, enc, "Ptr*", &pGw := 0)                              ; GetMetadataQueryWriter
+        gw := ComValue(13, pGw)
+        app := Buffer(11)
+        StrPut("NETSCAPE2.0", app, 11, "CP0")
+        loopData := Buffer(5, 0)
+        NumPut("UChar", 3, "UChar", 1, "UChar", 0, "UChar", 0, "UChar", 0, loopData)
+        WicSetMeta(gw, "/appext/Application", WicProp(0x1011, app))
+        WicSetMeta(gw, "/appext/Data", WicProp(0x1011, loopData))
+        WicSetMeta(gw, "/logscrdesc/Width", WicProp(18, w))
+        WicSetMeta(gw, "/logscrdesc/Height", WicProp(18, h))
+    }
+    stride := w * 4
+    pix := Buffer(stride * h, 0)
+    rect := Buffer(16, 0)
+    NumPut("Int", 0, "Int", 0, "Int", w, "Int", h, rect)
+    bd := Buffer(A_PtrSize = 8 ? 32 : 24, 0)
+    i := 0
+    while (i < frames) {
+        ; this frame's delay = all the frames it stands in for
+        delay := 0
+        loop step {
+            k := i + A_Index - 1
+            if (k < frames)
+                delay += delays[k + 1]
+        }
+        DllCall("gdiplus\GdipImageSelectActiveFrame", "Ptr", pImg, "Ptr", timeDim, "UInt", i)
+        pFrame := DrawBitmap(pImg, w, h, 0xFFFFFFFF)                    ; scaled, on white
+        if (!pFrame)
+            throw Error("A frame couldn't be drawn")
+        NumPut("UInt", w, "UInt", h, "Int", stride, "Int", 0x26200A, bd, 0)
+        NumPut("Ptr", pix.Ptr, bd, 16)
+        DllCall("gdiplus\GdipBitmapLockBits", "Ptr", pFrame, "Ptr", rect, "UInt", 5, "Int", 0x26200A, "Ptr", bd)
+        DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pFrame, "Ptr", bd)
+        GdipFree(pFrame)
+        ComCall(20, factory, "UInt", w, "UInt", h, "Ptr", fmtBGR, "UInt", stride,
+                "UInt", pix.Size, "Ptr", pix, "Ptr*", &pBmp := 0)        ; CreateBitmapFromMemory
+        bmp := ComValue(13, pBmp)
+        ComCall(9, factory, "Ptr*", &pPal := 0)                          ; CreatePalette
+        pal := ComValue(13, pPal)
+        ComCall(5, pal, "Ptr", bmp, "UInt", 256, "Int", 0)               ; InitializeFromBitmap
+        ComCall(10, factory, "Ptr*", &pConv := 0)                        ; CreateFormatConverter
+        conv := ComValue(13, pConv)
+        ComCall(8, conv, "Ptr", bmp, "Ptr", fmt8, "Int", 0, "Ptr", pal,
+                "Double", 0.0, "Int", 0)                                 ; Initialize: no dither (smaller), custom palette
+        ComCall(10, enc, "Ptr*", &pFe := 0, "Ptr", 0)                    ; CreateNewFrame
+        fe := ComValue(13, pFe)
+        ComCall(3, fe, "Ptr", 0)                                         ; Initialize
+        ComCall(4, fe, "UInt", w, "UInt", h)                             ; SetSize
+        pf := Buffer(16)
+        DllCall("RtlMoveMemory", "Ptr", pf, "Ptr", fmt8, "UPtr", 16)
+        ComCall(6, fe, "Ptr", pf)                                        ; SetPixelFormat
+        ComCall(8, fe, "Ptr", pal)                                       ; SetPalette
+        try {
+            ComCall(13, fe, "Ptr*", &pFw := 0)                           ; GetMetadataQueryWriter
+            fw := ComValue(13, pFw)
+            WicSetMeta(fw, "/grctlext/Delay", WicProp(18, Max(2, delay)))
+            WicSetMeta(fw, "/grctlext/Disposal", WicProp(17, 1))         ; leave it: every frame is whole
+        }
+        ComCall(11, fe, "Ptr", conv, "Ptr", 0)                           ; WriteSource
+        ComCall(12, fe)                                                  ; Commit
+        fe := conv := pal := bmp := ""
+        i += step
+    }
+    ComCall(11, enc)                                                     ; Commit
+    enc := stream := ""                                                  ; closes the file
+    return IsGifFile(dst)
+}
+
+; Makes a smaller animated copy of srcPath at dstPath, at most targetKB.
+; Tries smaller sizes, then fewer frames. Returns "" if it worked, else
+; the reason.
+ShrinkGif(srcPath, dstPath, targetKB) {
+    if (!GdipStart())
+        return "Windows' picture library couldn't be started"
+    pImg := 0
+    if (DllCall("gdiplus\GdipCreateBitmapFromFile", "Str", srcPath, "Ptr*", &pImg) != 0 || !pImg)
+        return "the GIF couldn't be opened"
+    try {
+        timeDim := WicGuid("{6AEDBD6D-3FB5-418A-83A6-7F45229DC872}")
+        frames := 0
+        DllCall("gdiplus\GdipImageGetFrameCount", "Ptr", pImg, "Ptr", timeDim, "UInt*", &frames)
+        if (frames < 2)
+            return "it isn't an animated GIF"
+        if (frames > 1000)
+            return "it has too many frames (" . frames . ")"
+        BitmapSize(pImg, &w, &h)
+        ; Delays in 1/100 s (PropertyTagFrameDelay); 10 if missing
+        delays := []
+        size := 0
+        DllCall("gdiplus\GdipGetPropertyItemSize", "Ptr", pImg, "UInt", 0x5100, "UInt*", &size)
+        item := size >= 16 ? Buffer(size, 0) : 0
+        got := item && DllCall("gdiplus\GdipGetPropertyItem", "Ptr", pImg, "UInt", 0x5100, "UInt", size, "Ptr", item) = 0
+        pVal := got ? NumGet(item, A_PtrSize = 8 ? 16 : 12, "Ptr") : 0
+        n := got ? NumGet(item, 4, "UInt") // 4 : 0
+        loop frames
+            delays.Push(A_Index <= n && pVal ? Max(0, NumGet(pVal, (A_Index - 1) * 4, "Int")) : 10)
+        ; Start no wider than 480 (a phone screen), then step down
+        base := Min(1, 480 / w, 480 / h)
+        tries := [[1, 1], [0.8, 1], [0.8, 2], [0.65, 2], [0.5, 2], [0.5, 3], [0.4, 3], [0.3, 4]]
+        tmp := dstPath . ".try"
+        for , t in tries {
+            nw := Max(16, Round(w * base * t[1]))
+            nh := Max(16, Round(h * base * t[1]))
+            ToolTip("Shrinking the GIF... " . nw . " x " . nh . (t[2] > 1 ? ", fewer frames" : ""))
+            if (!WriteGifFrames(pImg, frames, delays, nw, nh, t[2], tmp))
+                return "Windows couldn't write the smaller GIF"
+            if (FileGetSize(tmp) <= targetKB * 1024) {
+                if (!DllCall("MoveFileEx", "Str", tmp, "Str", dstPath, "UInt", 0x9))
+                    return "the smaller GIF couldn't be saved"
+                return ""
+            }
+        }
+        try FileDelete(tmp)
+        return "even at its smallest it was still over " . targetKB . " KB"
+    } catch Error as err {
+        return "Windows couldn't make the smaller GIF (" . err.Message . ")"
+    } finally {
+        ToolTip()
+        GdipFree(pImg)
+        try FileDelete(dstPath . ".try")
+    }
+}
+
 ; ── Adding a picture ────────────────────────────────────────────────────
 ; Asks where the picture comes from (snip, the clipboard, a file), shows
 ; it, offers Shrink when it's large, and saves it in the images folder.
@@ -4959,10 +5139,12 @@ PickPicture(suggest, replaceName := "", hideGui := "") {
     pBmp := 0
     result := ""
     gifPath := ""            ; v2.2.2: an animated GIF file to keep as it is
+    gifOriginal := ""        ; the chosen GIF, before any Shrink
     try {
         loop {
             if (!pBmp) {
                 gifPath := ""
+                gifOriginal := ""
                 if (src = "snip")
                     pBmp := SnipToBitmap(hideGui)
                 else if (src = "clip")
@@ -4988,6 +5170,26 @@ PickPicture(suggest, replaceName := "", hideGui := "") {
             if (choice = "still") {
                 gifPath := ""                     ; use the first frame as a still picture
                 continue
+            }
+            if (choice = "gifshrink") {
+                ; a smaller copy that still moves; shrinking again starts from the original
+                if (gifOriginal = "")
+                    gifOriginal := gifPath
+                shrunk := imagesDir . "\~shrunk.gif"
+                why := ShrinkGif(gifOriginal, shrunk, imageCfg["GifTargetKB"])
+                if (why != "") {
+                    MsgBox("The GIF couldn't be made small enough for a text message: " . why . ".`n`n" .
+                           "You can still save it for email and chat, use a still picture, " .
+                           "or choose a smaller GIF.", "Shrink GIF", "Iconi")
+                    continue
+                }
+                pSmall := LoadBitmap(shrunk, imageCfg["LoadPixels"])
+                if (pSmall) {
+                    GdipFree(pBmp)
+                    pBmp := pSmall
+                }
+                gifPath := shrunk
+                continue                          ; show it again, smaller
             }
             if (choice = "retake") {
                 GdipFree(pBmp)
@@ -5038,6 +5240,7 @@ PickPicture(suggest, replaceName := "", hideGui := "") {
     } finally {
         GdipFree(pBmp)
         try FileDelete(tempPath)
+        try FileDelete(imagesDir . "\~shrunk.gif")
     }
 }
 
@@ -5223,7 +5426,7 @@ PreviewGif(pBmp, framePath, sc, gifPath) {
     bytes := FileGetSize(gifPath)
     frames := GifFrameCount(gifPath)
     tooBig := bytes > imageCfg["MaxFileMB"] * 1024 * 1024
-    large  := bytes > imageCfg["WarnKB"] * 1024
+    large  := bytes > imageCfg["GifTargetKB"] * 1024
     f  := Min(560 / w, 380 / h, 1)
     pw := Max(1, Round(w * f))
     ph := Max(1, Round(h * f))
@@ -5240,13 +5443,13 @@ PreviewGif(pBmp, framePath, sc, gifPath) {
     y += 44
     if (tooBig) {
         g.Add("Text", "x10 y" . y . " w560 h40 cB00020",
-              "This GIF is larger than " . imageCfg["MaxFileMB"] . " MB, too large to keep moving. " .
-              "Use it as a still picture, or choose a smaller GIF.")
+              "This GIF is larger than " . imageCfg["MaxFileMB"] . " MB, too large to keep as it is. " .
+              "Shrink it, use a still picture, or choose a smaller GIF.")
         y += 44
     } else if (large) {
         g.Add("Text", "x10 y" . y . " w560 h40 cB00020",
-              "This GIF is large. A text message may not send it; email and chat apps are fine. " .
-              "A still picture is much smaller.")
+              "Too big for most text messages (Google Voice and texts often refuse GIFs over about " .
+              imageCfg["GifTargetKB"] . " KB). Email and chat apps are fine. Shrink makes it smaller and keeps it moving.")
         y += 44
     }
     g.Add("Text", "x10 y" . y . " w560 h60 cGray",
@@ -5255,18 +5458,23 @@ PreviewGif(pBmp, framePath, sc, gifPath) {
           "can't show it moving; use a still picture there.")
     y += 64
     bx := 10
-    if (!tooBig) {
-        g.Add("Button", "x" . bx . " y" . y . " w150 h30 Default", "&Save (moving)")
-            .OnEvent("Click", (*) => (res.v := "save", g.Destroy()))
-        bx += 158
+    if (large || tooBig) {
+        g.Add("Button", "x" . bx . " y" . y . " w118 h30 Default", "S&hrink")
+            .OnEvent("Click", (*) => (res.v := "gifshrink", g.Destroy()))
+        bx += 124
     }
-    g.Add("Button", "x" . bx . " y" . y . " w150 h30" . (tooBig ? " Default" : ""), "S&till picture instead")
+    if (!tooBig) {
+        g.Add("Button", "x" . bx . " y" . y . " w118 h30" . (large ? "" : " Default"), large ? "&Save as it is" : "&Save (moving)")
+            .OnEvent("Click", (*) => (res.v := "save", g.Destroy()))
+        bx += 124
+    }
+    g.Add("Button", "x" . bx . " y" . y . " w118 h30", "S&till picture")
         .OnEvent("Click", (*) => (res.v := "still", g.Destroy()))
-    bx += 158
-    g.Add("Button", "x" . bx . " y" . y . " w120 h30", "&Other file...")
+    bx += 124
+    g.Add("Button", "x" . bx . " y" . y . " w100 h30", "&Other file...")
         .OnEvent("Click", (*) => (res.v := "retake", g.Destroy()))
-    bx += 128
-    g.Add("Button", "x" . bx . " y" . y . " w100 h30", "Cancel")
+    bx += 106
+    g.Add("Button", "x" . bx . " y" . y . " w80 h30", "Cancel")
         .OnEvent("Click", (*) => g.Destroy())
     g.OnEvent("Close",  (*) => g.Destroy())
     g.OnEvent("Escape", (*) => g.Destroy())
