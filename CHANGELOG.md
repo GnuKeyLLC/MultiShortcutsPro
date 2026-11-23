@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.2.3
+
+Everything from v2.2.2 (animated GIFs and GIF Shrink), plus:
+
+### New
+- **The large menu.** Click the tray icon once and a window of big, clearly labeled buttons opens in the middle of the screen: Add Text, Add Picture, Add App, Add a Form, Edit Shortcuts, Pause, Help, Reload, Exit and more. **A −** and **A +** change the text size (10 to 28 points, remembered in `prefs.ini` under `[BigMenu]`). Made with tired eyes and low vision in mind. Right-click still opens the small menu.
+- **Settings and Tools on one large screen, with Alt+O** (O for Options). Every setting and tool from the Settings, Tools and Help sub-menus, with no sub-menus to open. Three columns: your keys (hold keys, space bar, middle mouse button, timing), how shortcuts behave (Shortcut Triggers, Privacy), and everything else (General, your shortcuts file, Fix a Problem, Help). Each setting reads **[ON]** in bold or **[off]**; click it to switch it, and the screen redraws in place. Alt+O works in Starter and Full mode, and while paused.
+- **Form Builder.** Fill out the same form every time (an intake, a referral, a records request) in any program. List the form's fields top to bottom and choose what goes in each: **Always type this**, **Ask me each time**, **Today's date** or **Skip this field**. Tick **Press Enter at the end** to submit, or **Slow form** for pages that lag. **Preview** reads it back in plain words. It writes an ordinary text shortcut, so no `{key:{Tab}}` codes to type. Tray menu → **Add a Shortcut** → **Form**, or **Add a Form** in the large menu.
+- **A one-time tip** on first start (and once after upgrading): a large box near the tray says Alt+O opens Settings and a click opens the large menu.
+
+### Changed
+- **Reload is back on the tray menu**, next to Exit. **Pause/Resume** shows a tick while paused, and Resume puts the normal icon back.
+- Quick Start, Help (Alt+H) and the start-up notice point to the large menu and Alt+O.
+
+### Security
+- What a placeholder produces (`{date:}`, `{time:}`, `{user}` and the rest) is always plain text now. Before, an imported shortcut could use a date format such as `{date:{}` to put together a `{key:}` step that the CSV import review never showed.
+
 ## v2.2.2
 
 ### New
