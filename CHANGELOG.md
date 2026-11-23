@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.2.2
+
+### New
+- **Animated GIFs.** Choose a `.gif` file when you add a picture (**Choose a picture file...**) and it stays animated. The shortcut pastes it as a file, the same as copying it in File Explorer and pressing Ctrl+V, so it keeps moving in Gmail, Google Voice, Slack, Teams and Discord. Outlook attaches it.
+  - The preview shows the GIF's first frame, its number of frames and its size, with **Save (moving)** or **Still picture instead**. Use a still picture for Word and other places that can't show a GIF moving.
+  - Large GIFs get a warning, since a text message may not send them. GIFs over 10 MB can only be used as a still picture.
+  - In the text a GIF is written `{image:name.gif}`. **Replace Picture...** can swap a still picture for a GIF or the other way round; click Save to keep the change.
+- Same safety rules as pictures: GIFs are kept in the `images` folder, `{image:}` only reads from there, only real GIF files are used (checked by their first bytes), the pasted GIF stays out of clipboard history and the cloud clipboard, your clipboard comes back afterwards, and Enter is never pressed for you.
+
 ## v2.2.1
 
 ### Changed
