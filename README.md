@@ -26,7 +26,7 @@ A quick tap of Space is still a normal space.
 
 ### Picture shortcuts
 
-Snip part of the screen once, then type a short shortcut to paste it: a logo, a product photo, a flyer, a QR code. Tray menu → **Add a Shortcut** → **Picture (snip or file)**. You can add text before or after the picture. MultiShortcuts shows the picture before saving it and offers **Shrink** when it's large for a text message. A shortcut with a picture never presses Enter for you, so nothing is sent before you check it.
+Snip part of the screen once, then type a short shortcut to paste it: a logo, a product photo, a flyer, a QR code. Tray menu → **Add a Shortcut** → **Picture (snip or file)**. You can add text before or after the picture. MultiShortcuts shows the picture before saving it and offers **Shrink** when it's large for a text message. A shortcut with a picture never presses Enter for you, so nothing is sent before you check it. Animated GIFs work too: choose a `.gif` file and it stays animated in Gmail, Google Voice, Slack, Teams and Discord.
 
 ---
 
