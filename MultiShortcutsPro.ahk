@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.2.2 - 2026
+; MULTISHORTCUTS PRO v2.2.3 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -129,6 +129,26 @@
 ;     explains itself when the mouse rests on it), and the full
 ;     placeholder list moved behind "More..."
 ; v2.2.2 (2026-11-23):
+;   - security: what a placeholder produces ({date:}, {time:}, {user} ...)
+;     is always plain text. Before, a date format like {date:{} could put
+;     a "{" in front of key:#r} and build a {key:} step that the CSV import
+;     review never showed.
+;   - tray menu: Reload is back on the main menu, next to Exit; Pause/Resume
+;     shows a tick while paused, and Resume puts the normal icon back
+;   - Large Menu: one left-click on the tray icon opens big, clearly
+;     labelled buttons (easier to read and to hit). A- / A+ change the
+;     text size (saved in prefs.ini [BigMenu] FontSize, 10 to 28).
+;     Right-click still shows the normal small menu.
+;   - Large Settings and Tools: everything from the Settings, Tools and
+;     Help sub-menus on one large screen, no sub-menus. Opened from the
+;     Large Menu's "Settings and Tools" button, or press Alt+O anywhere
+;     (works in Starter and Full mode, and while paused).
+;   - Form Builder: list a form's fields top to bottom, pick what goes in
+;     each (always this text / ask me / today's date / skip), and it
+;     writes the form-filling shortcut - no {key:{Tab}} codes to type.
+;     Tray > Add a Shortcut > Form, or the Large Menu's Add a Form.
+;   - First start (and once after upgrading): a large tip box near the
+;     tray says Alt+O opens Settings and a click opens the large menu.
 ;   - animated GIFs: choose a .gif file and it is kept as it is, then
 ;     pasted as a file (like File Explorer's Copy), so it keeps moving in
 ;     Gmail, Google Voice, Slack, Teams and Discord. Or use it as a still
@@ -137,6 +157,10 @@
 ;     GifTargetKB). Shrink writes a smaller animated copy (GDI+ reads the
 ;     frames, Windows Imaging Component writes the GIF): up to 480 px,
 ;     then smaller, then fewer frames, until it fits.
+; v2.2.3 (2026-11-23):
+;   - one version again: the GIF work (above) and the menus, security
+;     fix and Form Builder (above) were made in two separate copies that
+;     were both called 2.2.2. This joins them. No other changes.
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -165,7 +189,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.2.2"
+global appVersion := "2.2.3"
 
 global config := Map(
     "Hotkeys", Map(
@@ -184,7 +208,8 @@ global config := Map(
         "ShowHelp",            "!h",
         "PauseResume",         "!p",
         "UndoExpansion",       "!z",
-        "SnipTool",            "!+s"
+        "SnipTool",            "!+s",
+        "ShowSettings",        "!o"     ; v2.2.2: Large Settings and Tools (O = Options)
     ),
     "Security", Map(
         "ConfirmDangerousTargets", true,
@@ -349,6 +374,8 @@ global spaceCmdList := [
     ["c", "capture", "Capture selection",  "Alt+C", "full"],   ; C = Capture, like Alt+C
     ["v", "snip",    "Screen clip",        "Alt+Shift+S", ""]  ; V = open scissors
 ]
+global bigMenuItem       := "Large Menu (click the icon)"   ; v2.2.2 - tray item that opens it
+global bigMenuGui        := ""        ; the large-button menu while it is open
 global mouseKeyOn        := false     ; middle mouse button in use (on by default, like ;)
 global mouseKeyMode      := "ctrl"    ; "alt"  = click types `, hold = Alt   (like Caps Lock)
                                       ; "ctrl" = click types ;, hold = Ctrl  (like the semicolon)
@@ -445,6 +472,11 @@ SafeInitialize() {
         ; What gets gated by Full mode is everything *else* - the editor, the
         ; user-customizable workflows, the heavy background machinery.
 
+        ; v2.2.2: Alt+O opens Large Settings and Tools in BOTH modes, and
+        ; while paused too ("S"), so settings are always one key away
+        try Hotkey(config["Hotkeys"]["ShowSettings"],
+                   (*) => RunCommand(() => ShowBigSettings()), "S")
+
         if (appMode = "full") {
             LoadUsageStats()
             LoadExpansionHistory()
@@ -470,6 +502,10 @@ SafeInitialize() {
             SetTimer(ShowAutoTriggerNews, holdKeysNews ? -2500 : -1500)
         if (firstRun)                           ; a new install starts with these rules
             try IniWrite("1", prefsPath, "Mode", "AutoTriggersNews")
+        ; v2.2.2: people upgrading see the Alt+O tip box once, after any
+        ; other What's New message
+        if (!firstRun && !EasyMenuTipShown())
+            SetTimer(ShowEasyMenuTip, (holdKeysNews || autoTrigNews) ? -4000 : -2500)
         justUnlocked := (appMode = "full" && TakeQuickStartFlag())
         if (justUnlocked)
             SetTimer(ShowFullQuickStart, -1500)
@@ -479,10 +515,10 @@ SafeInitialize() {
         } else if (appMode = "full") {
             TrayTip("MultiShortcuts v" . appVersion . " - Full",
                 "Online - " . loadedLaunchers.Count . " launchers, " .
-                loadedExpansions.Count . " expansions`nAuto-reload active", "Iconi")
+                loadedExpansions.Count . " expansions`nClick the tray icon for the large, easy menu", "Iconi")
         } else {
             starterMsg := "Ready! Built-in shortcuts work right away."
-            starterMsg .= "`nRight-click the tray icon to learn more."
+            starterMsg .= "`nClick the tray icon for the large, easy menu."
             TrayTip("MultiShortcuts v" . appVersion . " - Starter", starterMsg, "Iconi")
         }
     } catch Error as err {
@@ -508,8 +544,9 @@ CheckFirstRun() {
         try IniWrite("1", prefsPath, "HoldKeys", "CapsLock")
     try IniWrite(mouseKeyOn ? mouseKeyMode : "0", prefsPath, "HoldKeys", "MiddleButton")
 
-    ; After start-up, so the hotkeys are live while the message is open
-    SetTimer(() => ShowQuickStart(true), -1000)
+    ; After start-up, so the hotkeys are live while the message is open.
+    ; v2.2.2: when the welcome closes, the Alt+O tip box comes up.
+    SetTimer(() => (ShowQuickStart(true), ShowEasyMenuTip()), -1000)
     return true
 }
 
@@ -554,7 +591,7 @@ HoldKeysIntro() {
         msg .= "      B = Backspace,  X = delete the last word,  Z = undo the last expansion`n"
         msg .= "      " . SpaceCmdLine("eq") . "   (when you let go of Space)`n"
     }
-    msg .= "`nCHANGE ANY OF IT - right-click the tray icon > Settings:`n"
+    msg .= "`nCHANGE ANY OF IT - press Alt+O (or click the tray icon > Settings and Tools):`n"
     msg .= "   Hold `; for Ctrl, hold `` for Alt  -  tick or untick`n"
     msg .= "   Caps Lock: tap = ``, hold = Alt  -  untick for the normal Caps Lock`n"
     msg .= "   Middle mouse button  -  like `; (Ctrl), like Caps Lock (Alt), or Off`n"
@@ -570,12 +607,14 @@ ShowStarterQuickStart(firstRun := false) {
     al := config["Triggers"]["AppLaunch"]
 
     msg := firstRun ? "Welcome to MultiShortcuts Pro! All of this works now, in any app.`n`n" : ""
+    msg .= "EASY TO SEE:  press Alt+O any time for all your settings on one large screen,`n"
+    msg .= "   or click the green H tray icon for the large menu.`n`n"
     msg .= HoldKeysIntro()
     msg .= "TYPE THESE ANYWHERE`n"
     msg .= "   " . wc . "c  Copy       " . wc . "v  Paste      " . wc . "s  Save`n"
     msg .= "   " . al . "c  Claude     " . al . "S  Snip       -=  Today's date`n`n"
-    msg .= "Tray menu > Show Built-in Shortcuts lists them all.`n"
-    msg .= "Want your own shortcuts? Choose * Unlock Full Features (free)."
+    msg .= "The large menu's Built-in Shortcuts button lists them all.`n"
+    msg .= "Want your own shortcuts? Choose Unlock Full Features (free)."
 
     if (!firstRun || FileExist(GetStartupLinkPath())) {
         MsgBox(msg, "MultiShortcuts Pro - Quick Start", "Iconi")
@@ -590,6 +629,8 @@ ShowFullQuickStart(*) {
     global config, capsKeyOn
     hk := config["Hotkeys"]
     msg := "Full features are on. Your built-in shortcuts still work.`n`n"
+    msg .= "EASY TO SEE:  press Alt+O any time for all your settings on one large screen,`n"
+    msg .= "   or click the green H tray icon for the large menu (A+ makes the text bigger).`n`n"
     msg .= "BUILD YOUR OWN`n"
     msg .= "   " . HotkeyLabel(hk["AddExpansion"])        . "   Add text you type often`n"
     msg .= "   " . HotkeyLabel(hk["AddWebLauncher"])      . "   Add a website or email`n"
@@ -767,6 +808,8 @@ SetupStarterTrayMenu() {
     A_TrayMenu.Add("MultiShortcuts (Starter)", (*) => 0)
     A_TrayMenu.Disable("MultiShortcuts (Starter)")
     A_TrayMenu.Add()
+    A_TrayMenu.Add(bigMenuItem,                (*) => ShowBigMenu())
+    A_TrayMenu.Add("Large Settings (Alt+O)",  (*) => ShowBigSettings())
     A_TrayMenu.Add("Show Built-in Shortcuts",  (*) => ShowHelp())
     A_TrayMenu.Add("* Unlock Full Features",   (*) => UnlockFullMode())
     A_TrayMenu.Add()
@@ -774,8 +817,6 @@ SetupStarterTrayMenu() {
     tm := Menu()
     tm.Add("Key Check (Ctrl+Alt+Shift+K)",          ShowKeyCheck)
     tm.Add("Release Stuck Keys (Ctrl+Alt+Shift+R)", ReleaseStuckKeys)
-    tm.Add()
-    tm.Add("Reload Script",                    (*) => Reload())
     A_TrayMenu.Add("Tools",                    tm)
     hm := Menu()
     hm.Add("Quick Start",                      (*) => ShowQuickStart())
@@ -783,8 +824,12 @@ SetupStarterTrayMenu() {
     A_TrayMenu.Add("Help",                     hm)
     traySubMenus.Push(tm, hm)
     A_TrayMenu.Add()
+    ; v2.2.2: Reload sits next to Exit, where people look for it
+    A_TrayMenu.Add("Reload",                   (*) => Reload())
     A_TrayMenu.Add("Exit",                     (*) => ExitApp())
-    A_TrayMenu.Default := "Show Built-in Shortcuts"
+    ; v2.2.2: one left-click opens the large-button menu
+    A_TrayMenu.Default    := bigMenuItem
+    A_TrayMenu.ClickCount := 1
     MarkTrayChecks()
 }
 
@@ -792,12 +837,16 @@ SetupStarterTrayMenu() {
 SetupFullTrayMenu() {
     global traySubMenus
     traySubMenus := []
+    A_TrayMenu.Add(bigMenuItem,                (*) => ShowBigMenu())
+    A_TrayMenu.Add("Large Settings (Alt+O)",  (*) => ShowBigSettings())
+    A_TrayMenu.Add()
     am := Menu()
     am.Add("Text Expansion (Alt+T, Space+F)",  (*) => AddNewExpansion())
     am.Add("Picture (snip or file)...",        (*) => AddPictureShortcut())
     am.Add("App Launcher (Alt+A)",             (*) => AddNewLauncher())
     am.Add("Document (Alt+D)",                 (*) => AddDocumentLauncher())
     am.Add("Web/Email (Alt+W)",                (*) => AddWebLauncher())
+    am.Add("Form (fill out the same form)...",  (*) => AddFormShortcut())
     am.Add()
     am.Add("Capture Selection (Alt+C, Space+C)", (*) => CaptureSelectedText())
     A_TrayMenu.Add("Add a Shortcut",           am)
@@ -817,7 +866,6 @@ SetupFullTrayMenu() {
     tm.Add()
     tm.Add("Key Check (Ctrl+Alt+Shift+K)",          ShowKeyCheck)
     tm.Add("Release Stuck Keys (Ctrl+Alt+Shift+R)", ReleaseStuckKeys)
-    tm.Add("Reload Script (Alt+R)",            (*) => Reload())
     A_TrayMenu.Add("Tools",                    tm)
     hm := Menu()
     hm.Add("Quick Start",                      (*) => ShowQuickStart())
@@ -825,9 +873,14 @@ SetupFullTrayMenu() {
     A_TrayMenu.Add("Help",                     hm)
     traySubMenus.Push(am, tm, hm)
     A_TrayMenu.Add()
+    ; v2.2.2: Reload sits next to Exit, where people look for it
+    A_TrayMenu.Add("Reload (Alt+R)",           (*) => Reload())
     A_TrayMenu.Add("Exit",                     (*) => ExitApp())
-    A_TrayMenu.Default := "Edit Shortcuts (Alt+E)"
+    ; v2.2.2: one left-click opens the large-button menu
+    A_TrayMenu.Default    := bigMenuItem
+    A_TrayMenu.ClickCount := 1
     MarkTrayChecks()
+    TrayCheck("Pause/Resume (Alt+P)", A_IsSuspended)
 }
 
 UpdateTrayTooltip() {
@@ -835,13 +888,326 @@ UpdateTrayTooltip() {
     if (appMode = "starter") {
         A_IconTip := "MultiShortcuts (Starter) v" . appVersion .
                      "`nBuilt-in trigger families active" .
-                     "`nRight-click for menu - Unlock Full when ready"
+                     "`nClick = large menu, right-click = small menu"
         return
     }
     status   := A_IsSuspended ? "PAUSED" : "Active"
     A_IconTip := "MultiShortcuts (Full) v" . appVersion . " (" . status . ")"
               . "`nLaunchers: "  . loadedLaunchers.Count
               . "   Expansions: " . loadedExpansions.Count
+              . "`nClick = large menu, right-click = small menu"
+}
+
+;------------------------------------------------
+; LARGE MENU (v2.2.2)
+;------------------------------------------------
+; One left-click on the tray icon opens this window: big, clearly
+; labelled buttons instead of the small Windows menu - easier to read and
+; to hit. Right-click still shows the normal menu (all settings live
+; there; "Settings and more..." opens it from here). The text size is
+; changed with the A- / A+ buttons and saved in prefs.ini [BigMenu].
+; Undo is left out on purpose: it deletes text in the window in front,
+; and after this window closes that may not be the one you were typing in.
+ShowBigMenu(*) {
+    global bigMenuGui, appMode, prefsPath
+    if (IsObject(bigMenuGui))               ; one large window at a time
+        BigMenuClose(bigMenuGui)
+    fs := 14
+    try {
+        v := IniRead(prefsPath, "BigMenu", "FontSize", "14")
+        if (IsInteger(v) && v >= 10 && v <= 28)
+            fs := Integer(v)
+    }
+
+    if (appMode = "full") {
+        items := [
+            ["Add Text",               AddNewExpansion],
+            ["Add Picture",            AddPictureShortcut],
+            ["Add App",                AddNewLauncher],
+            ["Add Website / Email",    AddWebLauncher],
+            ["Add Document / Folder",  AddDocumentLauncher],
+            ["Add a Form",             AddFormShortcut],
+            ["Capture Selected Text",  CaptureSelectedText],
+            ["Edit Shortcuts",         () => ShowEditGUI("launchers")],
+            ["Quick Picker",           QuickTextExpansion],
+            ["Screen Clip (Snip)",     () => Send("#+s")],
+            [A_IsSuspended ? "Resume  (paused now)" : "Pause", ToggleMacrosPause],
+            ["Help",                   ShowHelp],
+            ["Settings and Tools  (Alt+O)", ShowBigSettings],
+            ["Reload",                 () => Reload()],
+            ["Exit MultiShortcuts",    () => ExitApp()]
+        ]
+    } else {
+        items := [
+            ["Built-in Shortcuts",     ShowHelp],
+            ["Quick Start",            () => ShowQuickStart()],
+            ["Unlock Full Features",   UnlockFullMode],
+            ["Key Check",              ShowKeyCheck],
+            ["Release Stuck Keys",     ReleaseStuckKeys],
+            ["Settings and Tools  (Alt+O)", ShowBigSettings],
+            ["Reload",                 () => Reload()],
+            ["Exit MultiShortcuts",    () => ExitApp()]
+        ]
+    }
+
+    bw  := fs * 20                          ; button size grows with the text
+    bh  := Round(fs * 3.2)
+    gap := Round(fs * 0.6)
+    g := Gui("+AlwaysOnTop -MinimizeBox", "MultiShortcuts v" . appVersion)
+    g.BackColor := "FFFFFF"
+    g.SetFont("s" . fs . " Bold", "Segoe UI")
+    g.MarginX := gap * 2, g.MarginY := gap * 2
+    g.Add("Text", "xm ym w" . (bw * 2 + gap) . " c1A1A2E",
+          A_IsSuspended ? "MultiShortcuts - PAUSED" : "MultiShortcuts")
+    g.SetFont("s" . fs . " Norm", "Segoe UI")
+    for i, it in items {
+        col := Mod(i - 1, 2)
+        pos := (col = 0) ? "xm y+" . gap : "x+" . gap . " yp"
+        g.Add("Button", pos . " w" . bw . " h" . bh, it[1])
+            .OnEvent("Click", BigMenuRun.Bind(g, it[2]))
+    }
+    ; Text size row
+    g.Add("Text", "xm y+" . (gap * 2) . " h" . bh . " +0x200 c444444", "Text size:")
+    g.Add("Button", "x+" . gap . " yp w" . (fs * 5) . " h" . bh, "A -")
+        .OnEvent("Click", (*) => BigMenuResize(g, fs - 2))
+    g.Add("Button", "x+" . gap . " yp w" . (fs * 5) . " h" . bh, "A +")
+        .OnEvent("Click", (*) => BigMenuResize(g, fs + 2))
+    g.Add("Button", "x+" . gap . " yp w" . (fs * 7) . " h" . bh, "Close")
+        .OnEvent("Click", (*) => BigMenuClose(g))
+    g.OnEvent("Close",  (*) => BigMenuClose(g))
+    g.OnEvent("Escape", (*) => BigMenuClose(g))
+    bigMenuGui := g
+    g.Show()                                 ; centred on the screen
+}
+
+; Closes the window first, then runs the choice in its own thread, so
+; the choice's own windows open cleanly in front
+BigMenuRun(g, fn, *) {
+    BigMenuClose(g)
+    SetTimer(fn, -100)
+}
+
+BigMenuClose(g) {
+    global bigMenuGui
+    try g.Destroy()
+    bigMenuGui := ""
+}
+
+BigMenuResize(g, newSize) {
+    global prefsPath
+    newSize := Max(10, Min(28, newSize))
+    try IniWrite(newSize, prefsPath, "BigMenu", "FontSize")
+    BigMenuClose(g)
+    ShowBigMenu()
+}
+
+;------------------------------------------------
+; LARGE SETTINGS AND TOOLS (v2.2.2)
+;------------------------------------------------
+; Every setting and tool from the tray's Settings, Tools and Help
+; sub-menus on one large screen - no sub-menus to open. Three columns:
+; Your keys | Shortcut Triggers and Privacy | General, file, fixes, Help.
+; A setting that is on reads "[ON]" in bold; clicking it switches it and
+; the window redraws in the same place. Buttons ending in "..." open
+; their own window. Text size is shared with the Large Menu.
+ShowBigSettings(x := "", y := "") {
+    global bigMenuGui, appMode, prefsPath, config
+    global holdKeysOn, capsKeyOn, spaceSymOn, spaceMode, mouseKeyOn, mouseKeyMode
+    global privateTyping, hidePreviews, allowCapture, autoTrig
+    if (IsObject(bigMenuGui))
+        BigMenuClose(bigMenuGui)            ; one large window at a time
+    fs := 14
+    try {
+        v := IniRead(prefsPath, "BigMenu", "FontSize", "14")
+        if (IsInteger(v) && v >= 10 && v <= 28)
+            fs := Integer(v)
+    }
+
+    ; Entry kinds: head = section title, set = on/off setting,
+    ; pick = one of several (Space bar, middle button),
+    ; do = runs and redraws, open = closes this window and opens another
+    ; v2.2.2 grouping: column 1 = your keys, column 2 = how your shortcuts
+    ; behave, column 3 = program, data, fixes and help
+    c1 := [
+        ["head", "Hold Keys"],
+        ["set",  "Hold `; = Ctrl, hold `` = Alt",   holdKeysOn, ToggleHoldKeys],
+        ["set",  "Caps Lock: tap = ``, hold = Alt", capsKeyOn,  ToggleCapsKey],
+        ["head", "Space Bar"],
+        ["pick", "Normal space bar",            !spaceSymOn,                          () => SetSpaceMode("off")],
+        ["pick", "Hold for symbols (Space+J = !)", spaceSymOn && spaceMode != "shift", () => SetSpaceMode("symbols")],
+        ["pick", "Hold for Shift (Space+a = A)",   spaceSymOn && spaceMode = "shift",  () => SetSpaceMode("shift")],
+        ["head", "Middle Mouse Button"],
+        ["pick", "Normal middle click",          !mouseKeyOn,                          () => SetMouseMode("off")],
+        ["pick", "Like Caps Lock (`` / Alt)",    mouseKeyOn && mouseKeyMode = "alt",   () => SetMouseMode("alt")],
+        ["pick", "Like semicolon (`; / Ctrl)",   mouseKeyOn && mouseKeyMode != "alt",  () => SetMouseMode("ctrl")],
+        ["head", "Fine-Tune Your Keys"],
+        ["do",   "How long to hold...",          SetHoldKeysTime],
+        ["open", "Change the " . config["Triggers"]["WinCmd"] . " and " . config["Triggers"]["AppLaunch"] . " keys...", () => ShowTriggerSetup()]
+    ]
+
+    shortNames := Map("DoubleTap", "Double Tap (addrr)", "Number", "Number at the end (sig2)",
+                      "AlmostAuto", "Almost Auto (x-ray, xN)", "Dollar", "Name ends in $$",
+                      "AutoCap", "Auto Capitalization", "AutoSpacing", "Auto Spacing")
+    c2 := [["head", "Shortcut Triggers"]]
+    for , it in AutoTriggerMenuItems() {
+        if (it[1] = "")
+            continue
+        name := shortNames.Has(it[1]) ? shortNames[it[1]] : it[2]
+        c2.Push(["set", name, autoTrig[it[1]],
+                 ToggleAutoTrigger.Bind(it[1], it[2], "", 0, "")])
+    }
+    c2.Push(["do",   "What do these mean?...",
+             () => MsgBox(AutoTriggerHelpText(), "Shortcut Triggers", "Iconi")])
+    c2.Push(["head", "Privacy"])
+    c2.Push(["set",  "Type directly (no clipboard)", privateTyping, TogglePrivateTyping])
+    if (appMode = "full") {
+        c2.Push(["set", "Hide expansion text in lists", hidePreviews, ToggleHidePreviews])
+        c2.Push(["set", "Alt+C capture",                allowCapture, ToggleAllowCapture])
+    }
+
+    c3 := [
+        ["head", "General"],
+        ["set",  "Start with Windows",  FileExist(GetStartupLinkPath()) != "", ToggleStartup],
+        ["set",  "Sound feedback",      config["Feedback"]["PlaySounds"],      ToggleSounds]
+    ]
+    if (appMode = "full") {
+        c3.Push(["head", "Your Shortcuts File"])
+        c3.Push(["do",   "Backup Now",          () => ImmediateBackup()])
+        c3.Push(["open", "Export to CSV...",    () => ExportToCSV()])
+        c3.Push(["open", "Import from CSV...",  () => ImportFromCSV()])
+        c3.Push(["open", "Usage Statistics...", () => ShowUsageStats()])
+    }
+    c3.Push(["head", "Fix a Problem"])
+    c3.Push(["do",   "Release Stuck Keys",      ReleaseStuckKeys])
+    c3.Push(["open", "Key Check...",            ShowKeyCheck])
+    c3.Push(["head", "Help"])
+    c3.Push(["open", "Quick Start...",          () => ShowQuickStart()])
+    c3.Push(["open", (appMode = "full") ? "Help..." : "Built-in Shortcuts...", ShowHelp])
+
+    cw  := fs * 23                          ; column width (wider: bold [ON] labels)
+    bh  := Round(fs * 2.5)                  ; button height
+    hh  := Round(fs * 2)                    ; section title height
+    gap := Round(fs * 0.5)
+    m   := gap * 2
+    g := Gui("-MinimizeBox", "MultiShortcuts - Settings and Tools")
+    g.BackColor := "FFFFFF"
+    g.MarginX := m, g.MarginY := m
+    bottom := 0
+    for colNum, col in [c1, c2, c3] {
+        cx := m + (colNum - 1) * (cw + m * 2)
+        cy := m
+        for , e in col {
+            if (e[1] = "head") {
+                if (cy > m)
+                    cy += gap                   ; a little air above each section
+                g.SetFont("s" . fs . " Bold c1A4FA0", "Segoe UI")
+                g.Add("Text", "x" . cx . " y" . cy . " w" . cw . " h" . hh . " +0x200", e[2])
+                cy += hh
+                continue
+            }
+            on := (e[1] = "set" || e[1] = "pick") && e[3]
+            label := e[2]
+            if (e[1] = "set")
+                label .= on ? "   [ON]" : "   [off]"
+            else if (on)
+                label .= "   [ON]"
+            g.SetFont("s" . fs . (on ? " Bold" : " Norm") . " c000000", "Segoe UI")
+            fn := (e[1] = "set" || e[1] = "pick") ? e[4] : e[3]
+            ; A long label gets a taller, two-line button (0x2000 = wrap)
+            ; so its [ON] / [off] is never cut off
+            h := StrLen(label) > 30 ? Round(bh * 1.7) : bh
+            g.Add("Button", "x" . cx . " y" . cy . " w" . cw . " h" . h . " Left +0x2000", "  " . label)
+                .OnEvent("Click", BigSettingsRun.Bind(g, e[1], fn))
+            cy += h + Round(gap / 2)
+        }
+        bottom := Max(bottom, cy)
+    }
+    ; Bottom row: text size, back to the Large Menu, close
+    g.SetFont("s" . fs . " Norm c444444", "Segoe UI")
+    by := bottom + m
+    g.Add("Text", "x" . m . " y" . by . " h" . bh . " +0x200", "Text size:")
+    g.SetFont("s" . fs . " Norm c000000", "Segoe UI")
+    g.Add("Button", "x+" . gap . " yp w" . (fs * 5) . " h" . bh, "A -")
+        .OnEvent("Click", (*) => BigSettingsResize(g, fs - 2))
+    g.Add("Button", "x+" . gap . " yp w" . (fs * 5) . " h" . bh, "A +")
+        .OnEvent("Click", (*) => BigSettingsResize(g, fs + 2))
+    g.Add("Button", "x+" . (gap * 4) . " yp w" . (fs * 11) . " h" . bh, "< Large Menu")
+        .OnEvent("Click", (*) => (BigMenuClose(g), ShowBigMenu()))
+    g.Add("Button", "x+" . gap . " yp w" . (fs * 7) . " h" . bh, "Close")
+        .OnEvent("Click", (*) => BigMenuClose(g))
+    g.OnEvent("Close",  (*) => BigMenuClose(g))
+    g.OnEvent("Escape", (*) => BigMenuClose(g))
+    bigMenuGui := g
+    if (x != "" && y != "")
+        g.Show("x" . x . " y" . y)          ; redraw where it was
+    else
+        g.Show()                             ; centred on the screen
+}
+
+; open = close this window, then run (the new window comes up in front).
+; set / pick / do = run now, rebuild the tray menu so its ticks match,
+; then redraw this window in the same place showing the new state.
+BigSettingsRun(g, kind, fn, *) {
+    if (kind = "open") {
+        BigMenuRun(g, fn)
+        return
+    }
+    x := "", y := ""
+    try WinGetPos(&x, &y, , , g.Hwnd)
+    try fn.Call()
+    try SetupTrayMenu()
+    BigMenuClose(g)
+    ShowBigSettings(x, y)
+}
+
+; One-time tip box (v2.2.2): shown after the first-run welcome, or once
+; to people upgrading. Large text, bottom right above the tray icon, stays
+; until closed. Remembered in prefs.ini [Mode] EasyMenuTip=1.
+EasyMenuTipShown() {
+    global prefsPath
+    try return IniRead(prefsPath, "Mode", "EasyMenuTip", "0") = "1"
+    return false
+}
+
+ShowEasyMenuTip(*) {
+    global prefsPath
+    try IniWrite("1", prefsPath, "Mode", "EasyMenuTip")
+    fs := 14
+    try {
+        v := IniRead(prefsPath, "BigMenu", "FontSize", "14")
+        if (IsInteger(v) && v >= 10 && v <= 28)
+            fs := Integer(v)
+    }
+    w := fs * 26
+    t := Gui("+AlwaysOnTop -MinimizeBox +Owner", "MultiShortcuts - Tip")
+    t.BackColor := "FFFDE7"
+    t.MarginX := fs, t.MarginY := fs
+    t.SetFont("s" . (fs + 2) . " Bold c1A4FA0", "Segoe UI")
+    t.Add("Text", "xm w" . w, "Easy to see, easy to change")
+    t.SetFont("s" . fs . " Norm c000000", "Segoe UI")
+    t.Add("Text", "xm w" . w . " y+" . Round(fs * 0.6),
+          "Press  Alt + O  any time for all your settings on one large screen.")
+    t.Add("Text", "xm w" . w . " y+" . Round(fs * 0.6),
+          "Or click the green H icon down here for the large menu.  A+ makes the text bigger.")
+    bh := Round(fs * 2.6)
+    t.Add("Button", "xm w" . (fs * 15) . " h" . bh . " y+" . fs, "Show me now")
+        .OnEvent("Click", (*) => (t.Destroy(), ShowBigSettings()))
+    t.Add("Button", "x+" . fs . " yp w" . (fs * 8) . " h" . bh . " Default", "Got it")
+        .OnEvent("Click", (*) => t.Destroy())
+    t.OnEvent("Escape", (*) => t.Destroy())
+    ; Bottom right of the work area, just above the tray
+    t.Show("Hide")
+    t.GetPos(, , &gw, &gh)
+    MonitorGetWorkArea(MonitorGetPrimary(), , , &right, &bottom)
+    t.Show("x" . (right - gw - 16) . " y" . (bottom - gh - 16))
+}
+
+BigSettingsResize(g, newSize) {
+    global prefsPath
+    newSize := Max(10, Min(28, newSize))
+    try IniWrite(newSize, prefsPath, "BigMenu", "FontSize")
+    BigMenuClose(g)
+    ShowBigSettings()
 }
 
 ;------------------------------------------------
@@ -1677,6 +2043,195 @@ AddNewExpansion(shortcut := "", instant := false, prefill := "", created := "") 
         }
         saveBtn.Enabled := true
         editVal.Focus()
+    }
+}
+
+;------------------------------------------------
+; FORM BUILDER (v2.2.2)
+;------------------------------------------------
+; Builds a form-filling shortcut without typing any codes. You list the
+; form's fields top to bottom and say what goes in each: always the same
+; text, ask me each time, today's date, or skip. The builder writes an
+; ordinary text expansion with Tab between the fields, e.g.
+;   {prompt:Patient name?}{key:{Tab}}{date:MM/dd/yyyy}{key:{Tab}}Dr. Smith
+; To use it: click in the form's first box and type the shortcut. Every
+; question is asked first, then the whole form fills in one go.
+AddFormShortcut(*) {
+    global textExpansionPath
+    instant := false
+    shortcut := PromptShortcut(
+        "Name for this form shortcut (what you'll type in the form's first box):`n`n" .
+        "Example: intakeF  or  recreqF",
+        "New Form Shortcut", &instant)
+    if (shortcut = "")
+        return
+    if (!CheckGlobalConflict(shortcut))
+        return
+
+    dateUS := FormatTime(, "MM/dd/yyyy")
+    kinds := ["Always type this:", "Ask me each time", "Today's date (" . dateUS . ")", "Skip this field"]
+    fields := []                                   ; each: {name, kind, text}
+
+    g := Gui("+AlwaysOnTop", "Form Builder - " . shortcut)
+    g.SetFont("s10", "Segoe UI")
+    g.BackColor := "FFFFFF"
+    hd := g.Add("Text", "x14 y12 w600", "Fill out the same form every time")
+    hd.SetFont("s12 Bold c1A4FA0")
+    g.Add("Text", "x14 y+6 w600",
+        "1.  Add the form's fields in order, top to bottom - the same order Tab moves through them.`n" .
+        "2.  For each one, choose what goes in it.`n" .
+        "3.  To use it: click in the form's first box and type " . shortcut . ".  Any questions come first,`n" .
+        "     then the whole form fills in.")
+    g.Add("Text", "x14 y+6 w600 cGray",
+        "Tip: Chrome already fills plain name-and-address forms. Use this for the forms you fill again`n" .
+        "and again at work - intake, referrals, records requests - in any program, not just Chrome.")
+
+    lv := g.Add("ListView", "x14 y+10 w600 h170 -Multi NoSortHdr", ["#", "Field", "What goes in it"])
+    lv.ModifyCol(1, 34), lv.ModifyCol(2, 200), lv.ModifyCol(3, 340)
+
+    g.Add("Text", "x14 y+12 w100", "Field name:")
+    edName := g.Add("Edit", "x120 yp-3 w200")
+    g.Add("Text", "x334 yp+3 w60", "Fills with:")
+    ddKind := g.Add("DropDownList", "x400 yp-3 w214 Choose1", kinds)
+    g.Add("Text", "x14 y+10 w100", "Text to type:")
+    edText := g.Add("Edit", "x120 yp-3 w494")
+    ddKind.OnEvent("Change", (*) => (edText.Enabled := (ddKind.Value = 1)))
+
+    g.Add("Button", "x14 y+10 w120 h30 Default", "&Add Field").OnEvent("Click", AddField)
+    g.Add("Button", "x+8 w100 h30", "&Remove").OnEvent("Click", RemoveField)
+    g.Add("Button", "x+8 w100 h30", "Move &Up").OnEvent("Click", (*) => MoveField(-1))
+    g.Add("Button", "x+8 w110 h30", "Move &Down").OnEvent("Click", (*) => MoveField(1))
+
+    cbEnter := g.Add("Checkbox", "x14 y+14 w600",
+        "Press Enter at the end (submits the form - leave off to check it first)")
+    cbSlow := g.Add("Checkbox", "x14 y+6 w600",
+        "Slow form: wait a moment between fields (for web pages that lag)")
+
+    g.Add("Text", "x14 y+10 w600 h1 0x10")
+    saveBtn := g.Add("Button", "x14 y+10 w110 h30", "&Save")
+    saveBtn.OnEvent("Click", DoSave)
+    g.Add("Button", "x+8 w110 h30", "&Preview").OnEvent("Click", DoPreview)
+    g.Add("Button", "x+8 w110 h30", "Cancel").OnEvent("Click", (*) => g.Destroy())
+    g.OnEvent("Close",  (*) => g.Destroy())
+    g.OnEvent("Escape", (*) => g.Destroy())
+    g.Add("Text", "x14 y+10 w600 cGray",
+        "Saved as a normal text shortcut: change it later in Edit Shortcuts (Alt+E). Don't put passwords in it.")
+    g.Show()
+    edName.Focus()
+
+    Describe(f) {
+        switch f.kind {
+            case 1: return "Always: " . f.text
+            case 2: return "Ask me: " . Question(f)
+            case 3: return "Today's date"
+            default: return "(skip)"
+        }
+    }
+
+    Question(f) => RegExMatch(f.name, "\?$") ? f.name : f.name . "?"
+
+    Refresh(sel := 0) {
+        lv.Delete()
+        for i, f in fields
+            lv.Add(i = sel ? "Select Focus Vis" : "", i, f.name, Describe(f))
+    }
+
+    AddField(*) {
+        g.Opt("+OwnDialogs")
+        name := Trim(edName.Value)
+        txt  := edText.Value
+        k    := ddKind.Value
+        if (name = "") {
+            MsgBox("Type the field's name first (for example: Patient name).", "Form Builder", "Icon!")
+            edName.Focus()
+            return
+        }
+        ; Braces and | would be read as codes - keep form text plain
+        if (RegExMatch(name, "[{}|]") || (k = 1 && RegExMatch(txt, "[{}]"))) {
+            MsgBox("Please leave out the characters  {  }  |  - they have a special meaning in shortcuts.",
+                   "Form Builder", "Icon!")
+            return
+        }
+        if (k = 1 && txt = "") {
+            MsgBox("Type the text this field should always get, or choose `"Ask me each time`".",
+                   "Form Builder", "Icon!")
+            edText.Focus()
+            return
+        }
+        fields.Push({name: name, kind: k, text: (k = 1 ? txt : "")})
+        Refresh(fields.Length)
+        edName.Value := "", edText.Value := ""
+        edName.Focus()
+    }
+
+    RemoveField(*) {
+        r := lv.GetNext()
+        if (!r)
+            return
+        fields.RemoveAt(r)
+        Refresh(Min(r, fields.Length))
+    }
+
+    MoveField(dir) {
+        r := lv.GetNext()
+        n := r + dir
+        if (!r || n < 1 || n > fields.Length)
+            return
+        tmp := fields[r], fields[r] := fields[n], fields[n] := tmp
+        Refresh(n)
+    }
+
+    Build() {
+        out := ""
+        tab := (cbSlow.Value ? "{wait:400}" : "") . "{key:{Tab}}"
+        for i, f in fields {
+            if (i > 1)
+                out .= tab
+            switch f.kind {
+                case 1: out .= f.text
+                case 2: out .= "{prompt:" . Question(f) . "}"
+                case 3: out .= "{date:MM/dd/yyyy}"
+            }
+        }
+        if (cbEnter.Value)
+            out .= "{key:{Enter}}"
+        else
+            out .= "{wait:50}"      ; ends on a step, so no stray space lands in the last field
+        return out
+    }
+
+    DoPreview(*) {
+        g.Opt("+OwnDialogs")
+        if (fields.Length = 0) {
+            MsgBox("Add at least one field first.", "Form Builder", "Iconi")
+            return
+        }
+        msg := "When you type " . shortcut . " in the form's first box:`n`n"
+        asks := 0
+        for , f in fields
+            asks += (f.kind = 2)
+        if (asks)
+            msg .= "First it asks " . asks . (asks = 1 ? " question" : " questions") . ". Then:`n"
+        for i, f in fields
+            msg .= "   " . i . ".  " . f.name . "  =  " . Describe(f) . "`n"
+        msg .= cbEnter.Value ? "`nThen it presses Enter to submit." : "`nIt stops there, so you can check before you submit."
+        MsgBox(msg, "Preview - " . shortcut, "Iconi")
+    }
+
+    DoSave(*) {
+        g.Opt("+OwnDialogs")
+        if (fields.Length = 0) {
+            MsgBox("Add at least one field first.", "Form Builder", "Icon!")
+            return
+        }
+        saveBtn.Enabled := false
+        ok := SaveEntry(textExpansionPath, shortcut, Build(), LoadTextExpansions,
+                        "Form Shortcut Added", "'" . shortcut . "' saved", instant)
+        if (ok) {
+            g.Destroy()
+            return
+        }
+        saveBtn.Enabled := true
     }
 }
 
@@ -3693,7 +4248,7 @@ ExpansionPreview(sc) {
     val := loadedExpansions[sc]
     if (RegExMatch(val, "\{(?!(?:date|time|day|month|year)\b)[^}]*\}"))
         return val
-    return ResolvePlaceholders(val)
+    return UnshieldBraces(ResolvePlaceholders(val))
 }
 
 ShowStarterHelp() {
@@ -3796,6 +4351,8 @@ ShowFullHelp() {
             [hk["CaptureExpansion"],    "Capture Selected Text as Expansion"]
         ]],
         ["MANAGE AND VIEW", [
+            ["Click tray",              "Large, easy menu"],
+            [hk["ShowSettings"],        "Settings and Tools (large screen)"],
             [hk["ShowEditGUI"],         "Edit Shortcuts (full GUI)"],
             [hk["ManageLaunchers"],     "Manage Launchers"],
             [hk["ManageExpansions"],    "Manage Text Expansions"],
@@ -5674,19 +6231,16 @@ ResolvePlaceholders(text, depth := 0) {
             foundPos := RegExMatch(result, pattern, &m, startPos)
             if (!foundPos)
                 break
-            replacement := handler.Call(m[1])
-            ; If the replacement contains further placeholders, recurse
-            ; with an incremented depth counter.
-            if (InStr(replacement, "{") && InStr(replacement, "}"))
-                replacement := ResolvePlaceholders(replacement, depth + 1)
+            ; v2.2.2: every placeholder's output is plain text. Its braces are
+            ; shielded, so a date format like {date:{} can't build a
+            ; {key:...} step that the import review never saw.
+            replacement := ShieldBraces(handler.Call(m[1]))
             result := SubStr(result, 1, foundPos - 1) . replacement . SubStr(result, foundPos + StrLen(m[0]))
             startPos := foundPos + StrLen(replacement)
         }
         ; Bare {name} form (no formatter)
         if (InStr(result, "{" . name . "}")) {
-            replacement := handler.Call("")
-            if (InStr(replacement, "{") && InStr(replacement, "}"))
-                replacement := ResolvePlaceholders(replacement, depth + 1)
+            replacement := ShieldBraces(handler.Call(""))
             result := StrReplace(result, "{" . name . "}", replacement)
         }
     }
@@ -6260,10 +6814,12 @@ ToggleAutoTrigger(key, label, itemName, itemPos, m) {
     global autoTrig, prefsPath, autoSpaceHook
     autoTrig[key] := !autoTrig[key]
     try IniWrite(autoTrig[key] ? "1" : "0", prefsPath, "AutoTriggers", key)
-    if (autoTrig[key])
-        m.Check(label)
-    else
-        m.Uncheck(label)
+    try {                               ; no menu when called from Large Settings
+        if (autoTrig[key])
+            m.Check(label)
+        else
+            m.Uncheck(label)
+    }
     if (key = "AutoSpacing") {
         ApplyAutoSpacingClicks()
         if (!autoTrig[key] && IsObject(autoSpaceHook))
@@ -6435,12 +6991,14 @@ ToggleMacrosPause() {
     if (!A_IsSuspended) {
         Suspend(true)
         TraySetIcon("shell32.dll", 131)
+        TrayCheck("Pause/Resume (Alt+P)", true)
         TrayTip("PAUSED", "All macros paused - press " .
                 HotkeyLabel(config["Hotkeys"]["PauseResume"]) . " to resume", "Iconi")
         PlayFeedback("ErrorSound")
     } else {
         Suspend(false)
-        TraySetIcon("shell32.dll", 46)
+        TraySetIcon("*")                  ; v2.2.2: back to the normal icon
+        TrayCheck("Pause/Resume (Alt+P)", false)
         TrayTip("ACTIVE", "All macros are active", "Iconi")
         PlayFeedback("ExpandSound")
     }

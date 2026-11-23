@@ -28,6 +28,14 @@ A quick tap of Space is still a normal space.
 
 Snip part of the screen once, then type a short shortcut to paste it: a logo, a product photo, a flyer, a QR code. Tray menu → **Add a Shortcut** → **Picture (snip or file)**. You can add text before or after the picture. MultiShortcuts shows the picture before saving it and offers **Shrink** when it's large for a text message. A shortcut with a picture never presses Enter for you, so nothing is sent before you check it. Animated GIFs work too: choose a `.gif` file and it stays animated in Gmail, Google Voice, Slack, Teams and Discord.
 
+### Easy to see, easy to click
+
+One click on the tray icon opens a large menu of big buttons, and **Alt+O** opens every setting and tool on one large screen, with no little sub-menus. **A +** makes the text as big as you need.
+
+### Fill out the same form every time
+
+The **Form Builder** makes one shortcut that fills a whole form, in any program: list the fields top to bottom, choose "always this", "ask me each time" or "today's date" for each, and it tabs through them for you. Chrome already fills plain name-and-address forms; this is for the work forms it can't.
+
 ---
 
 ## Requirements
@@ -74,7 +82,7 @@ MultiShortcuts Pro includes tools for:
 1. Install AutoHotkey v2.
 2. Download `MultiShortcutsPro.ahk` from the latest release.
 3. Double-click `MultiShortcutsPro.ahk`.
-4. Right-click the MultiShortcuts Pro tray icon to open the menu: **Add a Shortcut**, **Edit Shortcuts**, **Snip**, **Pause/Resume**, **Settings**, **Tools**, **Help** and **Exit**.
+4. Click the MultiShortcuts Pro tray icon once for the **large menu**: big, clearly labeled buttons. Press **Alt+O** any time for all the settings on one large screen. Right-click the icon for the small menu.
 
 MultiShortcuts Pro starts in **Starter mode**: the built-in `;`, `` ` `` and `=` shortcuts work right away. When you want your own shortcuts, the editor and the other tools, choose **Unlock Full Features** from the tray menu. It's free.
 
