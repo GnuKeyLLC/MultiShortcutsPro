@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ;================================================
-; MULTISHORTCUTS PRO v2.2.3 - 2026
+; MULTISHORTCUTS PRO v2.2.4 - 2026
 ; STARTER & FULL MODES - ; / ` / = SHORTCUT FAMILIES
 ;================================================
 ; © GnuKey LLC
@@ -161,6 +161,9 @@
 ;   - one version again: the GIF work (above) and the menus, security
 ;     fix and Form Builder (above) were made in two separate copies that
 ;     were both called 2.2.2. This joins them. No other changes.
+; v2.2.4 (2026-11-23):
+;   - "GIF" in the picture buttons and menu (Add Picture or GIF), so
+;     people know a moving GIF is possible before they start
 ;================================================
 ; HOTKEYS:
 ;   Alt+T  Add Text Expansion
@@ -189,7 +192,7 @@
 ;------------------------------------------------
 ; Version shown in every window title, tray tip and the tray tooltip.
 ; Change it here only.
-global appVersion := "2.2.3"
+global appVersion := "2.2.4"
 
 global config := Map(
     "Hotkeys", Map(
@@ -842,7 +845,7 @@ SetupFullTrayMenu() {
     A_TrayMenu.Add()
     am := Menu()
     am.Add("Text Expansion (Alt+T, Space+F)",  (*) => AddNewExpansion())
-    am.Add("Picture (snip or file)...",        (*) => AddPictureShortcut())
+    am.Add("Picture or GIF (snip or file)...", (*) => AddPictureShortcut())
     am.Add("App Launcher (Alt+A)",             (*) => AddNewLauncher())
     am.Add("Document (Alt+D)",                 (*) => AddDocumentLauncher())
     am.Add("Web/Email (Alt+W)",                (*) => AddWebLauncher())
@@ -922,7 +925,7 @@ ShowBigMenu(*) {
     if (appMode = "full") {
         items := [
             ["Add Text",               AddNewExpansion],
-            ["Add Picture",            AddPictureShortcut],
+            ["Add Picture or GIF",     AddPictureShortcut],
             ["Add App",                AddNewLauncher],
             ["Add Website / Email",    AddWebLauncher],
             ["Add Document / Folder",  AddDocumentLauncher],
@@ -1977,9 +1980,9 @@ AddNewExpansion(shortcut := "", instant := false, prefill := "", created := "") 
         b.OnEvent("Click", (*) => InsertIntoEdit(editVal, code))
         AddHoverTip(b, tip)
     }
-    picBtn := gExp.Add("Button", "x12 y218 w128 h30", "Add P&icture...")
+    picBtn := gExp.Add("Button", "x12 y218 w128 h30", "P&icture or GIF...")
     picBtn.OnEvent("Click", (*) => InsertPicture(gExp, editVal, shortcut, created))
-    AddHoverTip(picBtn, "Add a picture: snip the screen, use a copied picture, or pick a photo.")
+    AddHoverTip(picBtn, "Add a picture: snip the screen, use a copied picture, or pick a photo.`nAn animated GIF file stays moving.")
     InsertButton("x148 y218 w100 h30", FormatTime(, "yyyy-MM-dd"), "{date}",
         "The date the shortcut is used, written like this.")
     InsertButton("x256 y218 w100 h30", FormatTime(, "dd/MM/yyyy"), "{date:dd/MM/yyyy}",
@@ -3911,7 +3914,7 @@ EditSelectedRow(lv, dataType, parentGui, searchCtrl, countCtrl) {
     created := []
     by := 168
     if (dataType != "launchers") {
-        gInline.Add("Button", "x120 y168 w156 h28", "Add P&icture...")
+        gInline.Add("Button", "x120 y168 w156 h28", "Add P&icture or GIF...")
             .OnEvent("Click", (*) => InsertPicture(gInline, editVal, Trim(editSC.Value), created))
         gInline.Add("Button", "x284 y168 w156 h28", "&Replace Picture...")
             .OnEvent("Click", (*) => ReplacePictureIn(gInline, editVal, Trim(editSC.Value), created))
@@ -5813,7 +5816,7 @@ AskPictureSource(replacing) {
     if (hasClip)
         g.Add("Button", "x10 y+6 w330 h30", "Use the picture on the &clipboard")
             .OnEvent("Click", (*) => (res.v := "clip", g.Destroy()))
-    g.Add("Button", "x10 y+6 w330 h30", "Choose a picture &file...")
+    g.Add("Button", "x10 y+6 w330 h30", "Choose a picture or GIF &file...")
         .OnEvent("Click", (*) => (res.v := "file", g.Destroy()))
     g.Add("Button", "x10 y+12 w330 h28", "Cancel")
         .OnEvent("Click", (*) => g.Destroy())
