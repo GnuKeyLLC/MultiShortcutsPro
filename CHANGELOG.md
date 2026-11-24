@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.2.4
+
+### Changed
+- **"GIF" is in the picture buttons now**, so it's clear before you start that a moving GIF works too: **Add Picture or GIF** in the large menu, **Add a Shortcut → Picture or GIF (snip or file)** in the tray menu, **Picture or GIF...** in the Add Text window, and **Choose a picture or GIF file...** where you pick the source.
+
 ## v2.2.3
 
 Everything from v2.2.2 (animated GIFs and GIF Shrink), plus:
